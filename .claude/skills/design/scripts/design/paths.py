@@ -103,23 +103,27 @@ def from_stored(job_dir: Path, value: str) -> Path:
     return p if p.is_absolute() else job_dir / p
 
 
+def link_new(src: Path, dest: Path) -> None:
+    """Give the finished file `src` a second name `dest` that must not exist yet: a hard link, or on a volume without them (exFAT, some network shares) an exclusive-create copy. A file already at `dest` is never replaced."""
+    try:
+        os.link(src, dest)
+    except FileExistsError:
+        raise Failure(f"{dest} already exists; it is never overwritten") from None
+    except OSError:
+        try:
+            with open(dest, "xb") as out, open(src, "rb") as data:
+                shutil.copyfileobj(data, out)
+        except FileExistsError:
+            raise Failure(f"{dest} already exists; it is never overwritten") from None
+
+
 def place_new(dest: Path, write) -> None:
     """Write a file that must not exist yet. `write(tmp)` writes beside it under a temporary name with the same extension, which is then linked into place, so `dest` never holds a half-written file and a file already there is never replaced."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.stem}.{uuid.uuid4().hex[:8]}{dest.suffix}")
     try:
         write(tmp)
-        try:
-            os.link(tmp, dest)
-        except FileExistsError:
-            raise Failure(f"{dest} already exists; it is never overwritten") from None
-        except OSError:
-            # A volume without hard links (exFAT, some network shares): an exclusive create still never replaces a file.
-            try:
-                with open(dest, "xb") as out, open(tmp, "rb") as src:
-                    shutil.copyfileobj(src, out)
-            except FileExistsError:
-                raise Failure(f"{dest} already exists; it is never overwritten") from None
+        link_new(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
 

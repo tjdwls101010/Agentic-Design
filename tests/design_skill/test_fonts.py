@@ -181,3 +181,20 @@ def test_damaged_inputs_are_bad_input_not_a_traceback(sandbox):
     bad.write_bytes(b"PK\x03\x04 not really a zip")
     r = sandbox.run("fonts-install", "--file", bad)
     assert r.code == 4 and "zip" in r.out["error"]
+
+
+def test_korean_file_names_stay_distinct(sandbox):
+    a = build(sandbox.root / "나눔고딕.ttf", family="Nanum A")
+    b = build(sandbox.root / "나눔명조.ttf", family="Nanum B")
+    r = sandbox.run("fonts-install", "--file", a, b)
+    assert r.code == 0, r.raw
+    assert sorted(p.name for p in sandbox.fonts.iterdir()) == sorted(["나눔고딕.ttf", "나눔명조.ttf"])
+    assert [row["status"] for row in r.out["fonts"]] == ["installed", "installed"]
+
+
+def test_a_bad_file_in_a_batch_installs_nothing(sandbox):
+    good = build(sandbox.root / "Good.ttf", family="Good")
+    junk = sandbox.root / "junk.ttf"
+    junk.write_bytes(b"hello")
+    assert sandbox.run("fonts-install", "--file", good, junk).code == 4
+    assert list(sandbox.fonts.iterdir()) == []

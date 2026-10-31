@@ -90,7 +90,7 @@ def _attach(doc: Path, layer_name: str, src: Path, matte: Image.Image, scratch: 
     if not layer.get("bounds"):
         raise Failure(f"layer {layer_name!r} is a {layer['kind']} with no pixel bounds; name the photo's own layer")
     x, y, w, h = layer["bounds"]
-    if abs((w / h) / (matte.width / matte.height) - 1) > 0.01:
+    if w <= 0 or h <= 0 or abs((w / h) / (matte.width / matte.height) - 1) > 0.01:
         raise Failure(f"layer {layer_name!r} is {w}x{h} on the canvas, not the photo's {matte.width}:{matte.height} shape: it is cropped, rotated or clipped, so the matte would not line up. Put the photo in whole (linked, scaled only) or attach the matte in the app", bounds=[x, y, w, h])
     # 성진: bounds place the matte for a scaled, unrotated layer; a rotated or skewed smart object needs its transform matrix, which info does not give.
     canvas = Image.new("L", (info["width"], info["height"]), 0)
@@ -111,7 +111,8 @@ def _attach(doc: Path, layer_name: str, src: Path, matte: Image.Image, scratch: 
 def _guard_hand_edits(job_dir: Path, doc: Path, layer_name: str) -> None:
     """Replacing a layer's mask throws away whatever was painted into it; when the document holds edits no version has, that may be 성진's hand work, so it is versioned first."""
     latest = ledger.latest_for(ledger.read(job_dir), paths.stored(job_dir, doc))
-    if latest is not None and paths.from_stored(job_dir, latest["snapshot"]).read_bytes() == doc.read_bytes():
+    snap = paths.from_stored(job_dir, latest["snapshot"]) if latest else None
+    if snap is not None and snap.is_file() and snap.read_bytes() == doc.read_bytes():
         return
     info = photocraft.info(doc)
     target = [l for l in photocraft.layers(info) if l["name"] == layer_name]
@@ -166,5 +167,5 @@ def cutout(job_dir: Path, src: Path, *, kind: str, instance: int | None, select:
         _guard_hand_edits(job_dir, doc, layer)
         result["attached"] = _attach(doc, layer, src, Image.fromarray(matte), job_dir / "etc")
         result["summary"] += f"; mask on layer {layer!r} of {doc.name}"
-    result["next"] = "look at the edge at 100% (proof --crop on hair, hands, glasses, held objects); fix the mask in the app or with a corrected --matte"
+    result["next"] = "look at the edge at 100% (proof --crop on hair, hands, glasses, held objects); fix the mask in the app, or version the document and cut again with a corrected --matte"
     return result

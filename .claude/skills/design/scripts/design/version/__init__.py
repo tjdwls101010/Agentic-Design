@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -22,6 +23,7 @@ __all__ = ["snapshot", "restore", "export", "app_of", "pick_doc", "GRADE_LONG_ED
 
 # A grade's render is for looking at on the sheet; the delivery is developed at full size by export.
 GRADE_LONG_EDGE = 2400
+STALE_STAGING_S = 6 * 3600
 APP_BY_SUFFIX = {".pcraft": "photocraft", ".vectorcraft": "vectorcraft"}
 
 
@@ -69,6 +71,9 @@ def _copy_new(src: Path, dest: Path) -> None:
 def _record(job_dir: Path, fields: dict, write_snapshot, ext: str) -> tuple[dict, list[str]]:
     """Write the snapshot and its render in a private staging folder, then, under the ledger's lock, give them the next free version number and add the row. Numbering at the end means two commands versioning at once never share a number or a render, and a file left by a killed run is skipped rather than blocking the number."""
     versions = job_dir / "versions"
+    for old in versions.glob(".staging-*"):  # left by a run that was killed; none lives this long
+        if time.time() - old.stat().st_mtime > STALE_STAGING_S:
+            shutil.rmtree(old, ignore_errors=True)
     stage = versions / f".staging-{uuid.uuid4().hex[:8]}"
     stage.mkdir(parents=True)
     render_ext = ".jpg" if fields["app"] == "lightcraft" else ".png"
@@ -87,7 +92,7 @@ def _record(job_dir: Path, fields: dict, write_snapshot, ext: str) -> tuple[dict
                 v += 1
             snap, render = versions / f"v{v}{ext}", versions / f"v{v}{render_ext}"
             for src, dest in ((snap_tmp, snap), (render_tmp, render)):
-                os.link(src, dest)
+                paths.link_new(src, dest)
                 linked.append(dest)
             entry = ledger.add_version(job, {**fields, "snapshot": paths.stored(job_dir, snap), "render": paths.stored(job_dir, render), "size": size}, v=v)
         linked.clear()

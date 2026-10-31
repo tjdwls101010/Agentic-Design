@@ -90,14 +90,14 @@ def _files_from(sources: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
 
 def _safe_name(name: str, fallback: str) -> str:
     """A file name for the fonts folder from a name a font file carries about itself: a third-party file can say "../x" or "/x", so only a plain name survives."""
-    clean = re.sub(r"[^A-Za-z0-9._ +-]", "_", Path(name).name).lstrip(". ")
-    return clean if clean and clean != Path(clean).suffix else fallback
+    clean = re.sub(r"[^\w .+-]", "_", paths.nfc(Path(name).name)).lstrip(". ")
+    return clean if clean and Path(clean).stem else fallback
 
 
 def _write(folder: Path, name: str, data: bytes) -> tuple[Path, str]:
     """Put one desktop font in the fonts folder: installed, or already_installed (the same bytes are there), or kept_existing (a different file holds the name; it is not replaced)."""
     dest = folder / name
-    if dest.resolve().parent != folder.resolve():
+    if dest.parent != folder or name in ("", ".", ".."):
         raise BadInput(f"{name!r} would land outside {folder}")
     if dest.exists():
         return dest, "already_installed" if dest.read_bytes() == data else "kept_existing"
@@ -144,7 +144,7 @@ def install(*, font_id: int | None = None, files: list[Path] = (), weights: list
 
     folder = paths.fonts_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    rows, families, warnings = [], [], []
+    rows, families, warnings, writes = [], [], [], []
     for name, data in _files_from(sources):
         loaded = _load(data, name)
         faces = []
@@ -186,16 +186,19 @@ def install(*, font_id: int | None = None, files: list[Path] = (), weights: list
                     font.save(buf)
                     ext = ".otf" if "CFF " in font or "CFF2" in font else ".ttf"
                     plan.append((row, buf.getvalue(), _safe_name(f"{row['postscript'] or Path(name).stem}{ext}", Path(name).stem + ext)))
-        for row, payload, filename in plan:
-            dest, status = _write(folder, filename, payload)
-            row.update({"file": str(dest), "status": status})
-            if status == "kept_existing":
-                warnings.append(f"{dest.name} already exists with different contents and was kept; compare it with {name} before replacing it by hand")
-            if 0 < row["hangul"] < len(glyphs.HANGUL):
-                warnings.append(f"{row['postscript']}: {row['hangul']} of 11172 Hangul syllables" + (" (every KS X 1001 syllable among them)" if row.get("missing_ks_x_1001") == 0 else "") + "; a syllable outside them renders in a fallback font, so check every string set in it")
-            rows.append(row)
-            if row["family"] not in families:
-                families.append(row["family"])
+        writes += plan
+    # Every file is read and checked before the first is written, so a bad file later in the batch leaves nothing half-installed.
+    for row, payload, filename in writes:
+        name = row["from"]
+        dest, status = _write(folder, filename, payload)
+        row.update({"file": str(dest), "status": status})
+        if status == "kept_existing":
+            warnings.append(f"{dest.name} already exists with different contents and was kept; compare it with {name} before replacing it by hand")
+        if 0 < row["hangul"] < len(glyphs.HANGUL):
+            warnings.append(f"{row['postscript']}: {row['hangul']} of 11172 Hangul syllables" + (" (every KS X 1001 syllable among them)" if row.get("missing_ks_x_1001") == 0 else "") + "; a syllable outside them renders in a fallback font, so check every string set in it")
+        rows.append(row)
+        if row["family"] not in families:
+            families.append(row["family"])
     seen = _seen(families)
     for family, styles in seen.get("photocraft", {}).items():
         if styles == []:

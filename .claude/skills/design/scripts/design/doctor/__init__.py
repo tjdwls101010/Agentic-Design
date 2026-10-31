@@ -17,7 +17,7 @@ def check() -> dict:
         if not state["installed"]:
             notes.append(f"{name} app is not in /Applications (headless work still runs)")
         elif state["cli_version"] and state["app_version"] and state["cli_version"] != state["app_version"]:
-            problems.append(f"{name} app {state['app_version']} and {name}-cli {state['cli_version']} differ: install the CLI of the app's version (gh release download of that tag, check its sha256, put it in ~/.local/bin)")
+            problems.append(f"{name} app {state['app_version']} and {name}-cli {state['cli_version']} differ: install the CLI of the app's version — gh release download v{state['app_version']} --repo storytold/{name} --pattern '{name}-cli-*-macos-universal.zip' --pattern SHA256SUMS.txt, check the zip against SHA256SUMS.txt (shasum -a 256), unzip it and put {name}-cli in ~/.local/bin")
     logged_in, detail = (codex.login_status() if codex.executable() else (False, "codex is not on PATH"))
     if not logged_in:
         problems.append(f"codex cannot generate images: {detail}")
