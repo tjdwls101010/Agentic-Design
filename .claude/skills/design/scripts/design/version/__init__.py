@@ -91,6 +91,7 @@ def _record(job_dir: Path, fields: dict, write_snapshot, ext: str) -> tuple[dict
 
 
 def snapshot(job_dir: Path, *, kind: str, direction: str, change: str | None, parent: int | None, doc: Path | None, photo: int | None, photo_file: Path | None, from_app: bool = False) -> dict:
+    """Version the document as it is. A document open in PhotoCraft or VectorCraft is versioned with from_app: the app saves it to its own path first, so the snapshot holds the app's state."""
     doc = doc or pick_doc(job_dir)
     if not doc.exists():
         raise Failure(f"{doc} does not exist; make the document first")
@@ -105,8 +106,19 @@ def snapshot(job_dir: Path, *, kind: str, direction: str, change: str | None, pa
         fields["parent"] = parent
     if change:
         fields["change"] = change
+    saved = None
+    pending_warning = None
     if from_app:
+        if app == "lightcraft":
+            raise Usage("--from-app is for PhotoCraft and VectorCraft documents; LightCraft saves its library as it goes")
+        saved = {"photocraft": photocraft, "vectorcraft": vectorcraft}[app].app_save(doc)
         fields["from_app"] = True
+    elif app != "lightcraft":
+        held = {"photocraft": photocraft, "vectorcraft": vectorcraft}[app].app_holds(doc)
+        if held:
+            raise Conflict(f"{app} has {doc.name} open, so the file on disk may lack edits made in the app since its last save; version it with --from-app (the app saves to its own path first)")
+        if held is None:
+            pending_warning = f"{app} is running without a control port: if it has {doc.name} open, this snapshot may lack edits made there since its last save"
     if app == "lightcraft":
         if photo is None or photo_file is None:
             raise Usage("a LightCraft version needs --photo-id (the photo's id in the library) and --photo (its original file)")
@@ -117,7 +129,10 @@ def snapshot(job_dir: Path, *, kind: str, direction: str, change: str | None, pa
         entry, warnings = _record(job_dir, fields, lambda snap: paths.place_new(snap, lambda tmp: tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=1))), ".json")
     else:
         entry, warnings = _record(job_dir, fields, lambda snap: _copy_new(doc, snap), doc.suffix)
-    return _result(job_dir, entry, warnings)
+    out = _result(job_dir, entry, warnings + ([pending_warning] if pending_warning else []))
+    if saved:
+        out["saved_in_app"] = saved
+    return out
 
 
 def _result(job_dir: Path, entry: dict, warnings: list[str]) -> dict:

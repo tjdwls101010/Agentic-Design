@@ -28,6 +28,7 @@ UNITS = {
     "paths": "helper",
     "platforms": "helper",
     "glyphs": "helper",
+    "control": "helper",
     "job": "feature",
     "sheet": "feature",
     "generate": "feature",
@@ -35,6 +36,8 @@ UNITS = {
     "version": "feature",
     "proof": "feature",
     "cutout": "feature",
+    "apps": "feature",
+    "doctor": "feature",
 }
 
 # Imports run one way: features → systems and stores → helpers.

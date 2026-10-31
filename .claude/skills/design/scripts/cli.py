@@ -18,7 +18,7 @@ import json
 import re
 import sys
 
-from design import cutout, fonts, generate, ledger, paths, platforms, proof, sheet
+from design import apps, cutout, doctor, fonts, generate, ledger, paths, platforms, proof, sheet
 from design import version as versions
 from design import job as jobs
 from design.errors import Failure, Usage
@@ -42,6 +42,10 @@ COMMANDS = {
     "export": "Deliver a version at the platform's size and check it against the platform",
     "record": "Write 성진's notes, Claude's critique, the chosen attempt and the finals",
     "sheet": "Rebuild or open the contact sheet",
+    "apps-status": "What each ArtCraft app has open, its control port, and app/CLI versions",
+    "apps-open": "Start an app 성진 can watch and Claude can drive (control port, vault roots), opening a document",
+    "apps-send": "Pass JSON-lines requests (stdin) to the running PhotoCraft or VectorCraft as they are",
+    "doctor": "Check the CLIs and apps (matching versions), codex login, Vision, SAM 3 and data/",
     "fonts-search": "Find Korean fonts on noonnu (눈누) by name, use and style",
     "fonts-info": "One noonnu font: license per use, styles, webfont files, download page",
     "fonts-install": "Install a noonnu font (OFL only) or font files and zips into the fonts folder",
@@ -200,7 +204,7 @@ failures: exit 3 if codex is missing or logged out (nothing is attempted); exit 
 output: {"summary", "version": N, "snapshot": <versions/vN.pcraft | .vectorcraft | .json>, "render": <versions/vN.png | .jpg>, "sheet", "warnings"?: [...]}
 warnings name linked files that are missing (the render came from the document's cache), VectorCraft export warnings (text that does not fit its frame), and any file in the job of 90 MiB or more (GitHub refuses files over 100 MiB and the vault is pushed there). The first version of a job opens the contact sheet.
 
-failures: exit 1 if the document does not exist, work/ holds no document or several and --doc is missing, or an app CLI fails; exit 2 if --doc is outside work/, --kind does not fit the document, or a grade lacks --photo-id/--photo; exit 3 if the app's CLI is missing.""", details="""\
+failures: exit 1 if the document does not exist, work/ holds no document or several and --doc is missing, an app CLI fails, or --from-app finds the document not open; exit 2 if --doc is outside work/, --kind does not fit the document, or a grade lacks --photo-id/--photo; exit 3 if the app's CLI is missing or --from-app cannot reach the app; exit 5 if the app has the document open and --from-app is not given (an app running without a control port only warns).""", details="""\
 Every state 성진 is shown gets a version, so "v18 was better" can be continued from v18's snapshot. The snapshot is a byte copy of the document (a .pcraft or .vectorcraft in work/), or for --kind grade the photo's full develop settings (sliders, curves, masks) read from the job's LightCraft library. The render comes from the snapshot: PhotoCraft updates linked content first (a re-exported photo or SVG shows); a grade is the original developed with the saved settings at a 2400 px long edge (export develops the delivery at full size).""")
     p.add_argument("job", type=job_type, help="short name under data/ or a path")
     p.add_argument("--kind", required=True, choices=list(ledger.DOC_KINDS), help="composite (a PhotoCraft composition), layout (a PhotoCraft structure draft with empty slots), vector (a VectorCraft document), grade (a photo developed in LightCraft)")
@@ -210,6 +214,7 @@ Every state 성진 is shown gets a version, so "v18 was better" can be continued
     p.add_argument("--doc", metavar="PATH", help="the document in work/ (default: the only .pcraft or .vectorcraft there); for grade, the LightCraft library folder (work/lightcraft)")
     p.add_argument("--photo-id", type=int, metavar="ID", help="grade: the photo's id in the library, as lightcraft-cli reports it")
     p.add_argument("--photo", metavar="FILE", help="grade: the photo's original file (in sources/)")
+    p.add_argument("--from-app", action="store_true", help="the document is open in PhotoCraft or VectorCraft: have the app save it to its own path first, then snapshot (without this, an open document is refused with exit 5)")
 
     p = command("restore", """\
 output: the output of version for the new version, with "kept_first"?: {"version", "why"} when edits no version had were versioned before restoring.
@@ -284,6 +289,34 @@ failures: exit 2 if the job does not exist.""")
     p.add_argument("job", type=job_type, help="short name under data/ or a path")
     p.add_argument("--open", action="store_true", help="open it in the default browser")
 
+    p = command("apps-status", """\
+output: {"summary", "apps": [{"app", "installed", "app_version", "cli_version", "running", "pid"?, "control_port"?, "documents"? (PhotoCraft: [{"path", "dirty", "active"}], VectorCraft: [{"title", "dirty", "active"}]), "roots"?, "library"? (LightCraft)}], "notes"?}
+An app running without a control port cannot be asked what it has open; notes says so.
+
+failures: none beyond exit 2 for bad arguments.""")
+
+    p = command("apps-open", """\
+output: {"state": the app's apps-status entry, "opened": what the app reported on opening the document | null, "drive"? (LightCraft)}
+
+failures: exit 3 if the app is already running without a control port (ask 성진 to save and quit it; it is never quit from here), or does not answer within 30 s; exit 2 if --doc is outside data/ or LightCraft is given no library folder; exit 1 if the app refuses to open the document.""", details="""\
+PhotoCraft starts with --control 7977, a token file and the vault's resolved path as both automation roots (the app compares roots as text, so the data/ symlink spelling would be refused); VectorCraft with --control 7979 and the same roots (it takes absolute paths only); LightCraft with --library <the job's work/lightcraft> --control 7980, driven afterwards with lightcraft-cli run --connect. An app already running with a control port is reused. The window opens on 성진's screen; while he works in it, do not drive its pointer or keys.""")
+    p.add_argument("app", choices=apps.APPS, help="photocraft, vectorcraft or lightcraft")
+    p.add_argument("--doc", metavar="PATH", help="the document to open (PhotoCraft/VectorCraft), or the job's library folder (LightCraft)")
+
+    p = command("apps-send", """\
+output: {"summary": counts by kind, "replies": [{"kind": ok | not_run | no_reply | refused_path | error, "id"?, "ok", "result" | "error"}], "next"?}
+not_run: the app never dispatched it (safe to send again). no_reply: dispatched and may still apply — inspect the document before resending. refused_path: the bridge refuses commands that take a file path (file.placeLinked, file.saveAs, …); next says the way around.
+
+failures: exit 3 if the app is not running or has no control port; exit 2 if a line is not a JSON request object or the app is LightCraft; exit 1 if any reply is not ok.""", details="""\
+Each stdin line is one request, {"method": ..., "params": {...}} (an "id" is optional), passed unchanged: engine.execute {command, params} runs any engine command, ui.inspect reads the app's state, ui.screenshot shows what 성진 sees, app.save writes the document to its own path (to another path it would make that path the document's file). PhotoCraft's token is sent first for you.""")
+    p.add_argument("app", choices=["photocraft", "vectorcraft"], help="the running app to talk to")
+
+    p = command("doctor", """\
+output: {"ok", "summary", "problems": [...], "notes"?: [...], "apps": {app: {"installed", "app_version", "cli_version", "running"}}, "codex": {"path", "version", "logged_in"}, "vision": {"ok", "detail"}, "sam3": {"installed", ...}, "data": {"path", "ok"}, "fonts_dir"}
+
+failures: exit 3 when there is a problem (a CLI missing or in another version than its app, codex logged out, Vision unavailable, data/ not a folder).""", details="""\
+Run it when a command fails unexpectedly or 성진 says an app was updated. The apps change every few days and their CLIs must match the installed app's version.""")
+
     p = command("fonts-search", """\
 output: {"summary", "url": the noonnu page read, "fonts": [{"id", "name", "maker", "weights": number of styles | null, "url"}], "next"?}
 24 fonts per page, in noonnu's popularity order. Every font noonnu lists is free for some commercial use; what each use allows is per font (fonts-info).
@@ -348,7 +381,7 @@ def run(args: argparse.Namespace, ap: Parser) -> tuple[dict, int]:
         result = generate.run(args.job, versions=args.version, n=args.n, timeout=args.timeout)
         return result, 0 if any(r["status"] == "ok" for r in result["results"]) else 1
     if cmd == "version":
-        return versions.snapshot(args.job, kind=args.kind, direction=args.direction, change=args.change, parent=args.parent, doc=paths.resolve_input(args.doc) if args.doc else None, photo=args.photo_id, photo_file=paths.resolve_input(args.photo) if args.photo else None), 0
+        return versions.snapshot(args.job, kind=args.kind, direction=args.direction, change=args.change, parent=args.parent, doc=paths.resolve_input(args.doc) if args.doc else None, photo=args.photo_id, photo_file=paths.resolve_input(args.photo) if args.photo else None, from_app=args.from_app), 0
     if cmd == "restore":
         return versions.restore(args.job, v=args.version), 0
     if cmd == "cutout":
@@ -374,6 +407,21 @@ def run(args: argparse.Namespace, ap: Parser) -> tuple[dict, int]:
         return jobs.record(args.job, notes=args.note, scope=args.scope or "job", version=args.version, critique=args.critique, chosen=args.chosen, finals=args.final, unfinals=args.unfinal), 0
     if cmd == "sheet":
         return {"sheet": str(sheet.rebuild(args.job, open_it=args.open))}, 0
+    if cmd == "apps-status":
+        return apps.status(), 0
+    if cmd == "apps-open":
+        return apps.launch(args.app, paths.resolve_input(args.doc) if args.doc else None), 0
+    if cmd == "apps-send":
+        if sys.stdin.isatty():
+            ap.error("apps-send: requests are read from stdin, one JSON object per line")
+        lines = [l for l in sys.stdin.read().splitlines() if l.strip()]
+        if not lines:
+            ap.error("apps-send: stdin holds no request")
+        result = apps.send(args.app, lines)
+        return result, 0 if all(r["kind"] == "ok" for r in result["replies"]) else 1
+    if cmd == "doctor":
+        result = doctor.check()
+        return result, 0 if result["ok"] else 3
     if cmd == "fonts-search":
         if args.page < 1:
             ap.error("fonts-search: --page starts at 1")

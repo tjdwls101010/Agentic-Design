@@ -102,3 +102,14 @@ def test_sys_path_edit_fails(broken, module):
 def test_unclassified_unit_fails(broken):
     (broken / "scripts" / PKG / "extra.py").write_text("x = 1\n")
     assert any("unit 'extra' is not classified" in p for p in check_tree(broken))
+
+
+def test_helper_importing_system_fails(broken):
+    append(broken / "scripts" / PKG / "control.py", f"from {PKG} import photocraft")
+    assert any("helper 'control' imports system 'photocraft'" in p for p in check_tree(broken))
+
+
+def test_feature_importing_feature_is_allowed_only_for_named_edges(broken):
+    append(broken / "scripts" / PKG / "version" / "__init__.py", f"from {PKG} import proof")
+    assert any("feature 'version' imports feature 'proof'" in p for p in check_tree(broken))
+    assert not any("feature 'version' imports feature 'sheet'" in p for p in check_tree(broken))

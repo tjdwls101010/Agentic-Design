@@ -10,14 +10,16 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import zlib
 from pathlib import Path
 
 import numpy as np
 
+from design import control
 from design.errors import Failure, Unavailable
 
-__all__ = ["CLI", "executable", "version", "run", "app_holds", "settings", "restore_settings", "export", "render", "prompt_matte"]
+__all__ = ["CLI", "executable", "version", "run", "app_holds", "app_state", "app_launch", "sam_status", "settings", "restore_settings", "export", "render", "prompt_matte"]
 
 CLI = "lightcraft-cli"
 
@@ -76,9 +78,57 @@ def render(photo: Path, out: Path, *, settings_file: Path, long_edge: int = 0, q
         raise Failure(f"{CLI} render failed: {r.stderr.strip()[-400:]}")
 
 
+
+def _bundle_version(app: Path) -> str | None:
+    try:
+        r = subprocess.run(["defaults", "read", str(app / "Contents" / "Info.plist"), "CFBundleShortVersionString"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+APP = "LightCraft"
+APP_PATH = Path("/Applications/LightCraft.app")
+PORT = 7980
+
+
+def app_state() -> dict:
+    """{"app", "installed", "app_version", "cli_version", "running", "pid"?, "control_port"?, "library"?}. The library the app works on is the one it was started with."""
+    cli = version()
+    state = {"app": "lightcraft", "installed": APP_PATH.is_dir(), "app_version": _bundle_version(APP_PATH), "cli_version": cli.split(" ")[1] if cli and " " in cli else cli, "running": False}
+    procs = control.processes(APP)
+    if procs:
+        args = procs[0]["args"]
+        port = control.flag(args, "--control")
+        state.update({"running": True, "pid": procs[0]["pid"], "control_port": int(port) if port else None, "library": control.flag(args, "--library")})
+    return state
+
+
 def app_holds(doc: Path) -> bool | None:
-    """Whether the running app has `doc` open: True, False (not running, or running without it), or None (running without a control port, so it cannot be asked)."""
-    return False  # 성진: replaced by the control-channel query in the apps step; until then nothing is detected
+    """Whether the running app works on the library `doc`: True, False, or None (running on its default library, which cannot be told apart)."""
+    state = app_state()
+    if not state["running"]:
+        return False
+    if not state.get("library"):
+        return None
+    return Path(state["library"]).resolve() == doc.resolve()
+
+
+def app_launch(library: Path) -> dict:
+    """Start LightCraft on a job's library with a control port; drive it with `lightcraft-cli run --connect`."""
+    if control.processes(APP):
+        state = app_state()
+        if state.get("library") and Path(state["library"]).resolve() == library.resolve() and state.get("control_port"):
+            return {"state": state, "opened": None}
+        raise Unavailable("LightCraft is already running" + (f" on {state['library']}" if state.get("library") else "") + "; ask 성진 to quit it (do not quit it yourself), then run apps-open again")
+    subprocess.run(["/usr/bin/open", "-n", "-a", str(APP_PATH), "--args", "--library", str(library), "--no-demo", "--control", str(PORT)], check=True, timeout=30)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            control.Channel(PORT).close()
+            return {"state": app_state(), "opened": str(library), "drive": f"lightcraft-cli run --connect 127.0.0.1:{PORT} <command> …"}
+        except Unavailable:
+            time.sleep(0.5)
+    raise Unavailable(f"LightCraft did not answer on its control port within 30s")
 
 
 LOGIT_SCALE = 8.0  # stored logits are steps of 1/8
@@ -140,3 +190,15 @@ def prompt_matte(photo: Path, text: str, width: int, height: int) -> tuple[np.nd
     if fine is not None:
         logits = np.where(np.isfinite(fine), fine, logits)
     return np.round(255 / (1 + np.exp(-logits))).astype(np.uint8), cell
+
+
+def sam_status() -> dict:
+    """{"installed": bool, "detail"?}: whether LightCraft's SAM 3 model (Object and Describe masks) is in place."""
+    if not executable():
+        return {"installed": False, "detail": f"{CLI} is not on PATH"}
+    r = subprocess.run([CLI, "run", "segment.model.status"], capture_output=True, text=True, timeout=60)
+    for line in r.stdout.splitlines():
+        if line.strip().startswith("{"):
+            result = (json.loads(line).get("result") or {})
+            return {"installed": bool(result.get("installed")), "dir": result.get("dir")}
+    return {"installed": False, "detail": r.stderr.strip()[-200:]}

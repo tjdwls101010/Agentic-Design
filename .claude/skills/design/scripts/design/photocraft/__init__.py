@@ -8,13 +8,16 @@ A linked smart object renders from the pixels cached in the document: a linked f
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
+from design import control
 from design.errors import Failure, Unavailable
 
-__all__ = ["CLI", "executable", "version", "run", "app_holds", "font_faces", "info", "layers", "links", "type_runs", "render", "UPDATE_LINKS"]
+__all__ = ["CLI", "executable", "version", "run", "app_holds", "app_state", "app_launch", "app_send", "app_save", "font_faces", "info", "layers", "links", "type_runs", "render", "UPDATE_LINKS"]
 
 CLI = "photocraft-cli"
 
@@ -124,6 +127,122 @@ def render(doc: Path, out: Path, *, size: tuple[int, int] | None = None, quality
     run(steps, file=doc, out=out, quality=quality)
 
 
+APP = "PhotoCraft"
+APP_PATH = Path("/Applications/PhotoCraft.app")
+PORT = 7977
+
+
+def _token_file() -> Path:
+    return Path(os.environ.get("TMPDIR", "/tmp")) / "design-skill" / "photocraft.token"
+
+
+def app_state() -> dict:
+    """The installed and running app: {"app", "installed", "app_version", "cli_version", "running", "pid"?, "control_port"?, "documents"?: [{"path", "dirty", "active"}], "roots"?}."""
+    cli = version()
+    state = {"app": "photocraft", "installed": APP_PATH.is_dir(), "app_version": _bundle_version(APP_PATH), "cli_version": cli.split(" ")[1] if cli and " " in cli else cli, "running": False}
+    procs = control.processes(APP)
+    if not procs:
+        return state
+    args = procs[0]["args"]
+    state.update({"running": True, "pid": procs[0]["pid"], "control_port": None})
+    port = control.flag(args, "--control")
+    if port:
+        state["control_port"] = int(port)
+        state["roots"] = {"read": control.flag(args, "--automation-read-root"), "write": control.flag(args, "--automation-write-root")}
+        token = control.flag(args, "--control-token-file")
+        try:
+            with control.Channel(int(port), Path(token) if token else None) as ch:
+                session = (ch.result("ui.inspect") or {}).get("session") or {}
+            state["documents"] = [{"path": d.get("path"), "dirty": d.get("dirty"), "active": d.get("index") == session.get("active")} for d in session.get("documents", [])]
+        except (Unavailable, Failure) as exc:
+            state["error"] = exc.message
+    return state
+
+
+def _bundle_version(app: Path) -> str | None:
+    try:
+        r = subprocess.run(["defaults", "read", str(app / "Contents" / "Info.plist"), "CFBundleShortVersionString"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def _channel() -> "control.Channel":
+    procs = control.processes(APP)
+    if not procs:
+        raise Unavailable("PhotoCraft is not running; open it with apps-open")
+    port = control.flag(procs[0]["args"], "--control")
+    if not port:
+        raise Unavailable("PhotoCraft is running without a control port, so it cannot be driven; ask 성진 to save and quit it, then apps-open")
+    token = control.flag(procs[0]["args"], "--control-token-file")
+    return control.Channel(int(port), Path(token) if token else None)
+
+
 def app_holds(doc: Path) -> bool | None:
     """Whether the running app has `doc` open: True, False (not running, or running without it), or None (running without a control port, so it cannot be asked)."""
-    return False  # 성진: replaced by the control-channel query in the apps step; until then nothing is detected
+    state = app_state()
+    if not state["running"]:
+        return False
+    if state.get("control_port") is None or "documents" not in state:
+        return None
+    target = doc.resolve()
+    return any(d.get("path") and Path(d["path"]).resolve() == target for d in state["documents"])
+
+
+def app_launch(root: Path, doc: Path | None = None) -> dict:
+    """Start PhotoCraft with a control port, a token file and `root` as both automation roots (paths compare as text, so give the resolved path), and open `doc` in it."""
+    if control.processes(APP):
+        state = app_state()
+        if state.get("control_port") is None:
+            raise Unavailable("PhotoCraft is already running without a control port; ask 성진 to save and quit it (do not quit it yourself), then run apps-open again")
+    else:
+        token = _token_file()
+        token.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["/usr/bin/open", "-n", "-a", str(APP_PATH), "--args", "--control", str(PORT), "--control-token-file", str(token), "--automation-read-root", str(root), "--automation-write-root", str(root)], check=True, timeout=30)
+        _wait_for_port()
+    opened = None
+    if doc is not None:
+        with _channel() as ch:
+            opened = ch.result("app.open", {"path": str(doc.resolve())})
+    return {"state": app_state(), "opened": opened}
+
+
+def _wait_for_port(seconds: float = 30) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        procs = control.processes(APP)
+        if procs and control.flag(procs[0]["args"], "--control"):
+            try:
+                _channel().close()
+                return
+            except Unavailable:
+                pass
+        time.sleep(0.5)
+    raise Unavailable(f"PhotoCraft did not answer on its control port within {seconds:.0f}s")
+
+
+def app_send(lines: list[str]) -> list[dict]:
+    """Pass request lines to the running app as they are, one reply each."""
+    with _channel() as ch:
+        return [ch.send_line(line) for line in lines]
+
+
+def app_save(doc: Path) -> dict:
+    """Save `doc` in the running app to its own path (a save to another path would make that path the document's file, and later saves would land there). Brings it to the front first when it is not the active document."""
+    state = app_state()
+    docs = state.get("documents")
+    if docs is None:
+        raise Unavailable("PhotoCraft is not reachable on a control port; nothing to save from")
+    target = doc.resolve()
+    match = [i for i, d in enumerate(docs) if d.get("path") and Path(d["path"]).resolve() == target]
+    if not match:
+        raise Failure(f"PhotoCraft does not have {doc.name} open; version the file on disk instead")
+    with _channel() as ch:
+        switched = False
+        if not docs[match[0]]["active"]:
+            ch.result("engine.execute", {"command": "document.activate", "params": {"document": match[0]}})
+            switched = True
+        saved = ch.result("app.save", {})
+    if saved and saved.get("path") and Path(saved["path"]).resolve() != target:
+        raise Failure(f"PhotoCraft saved to {saved['path']}, not {doc}; check the app before going on")
+    return {"saved": str(target), "switched_active_document": switched}
