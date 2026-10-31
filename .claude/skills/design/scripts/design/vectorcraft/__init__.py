@@ -12,7 +12,7 @@ from pathlib import Path
 
 from design.errors import Failure, Unavailable
 
-__all__ = ["CLI", "executable", "version", "run", "font_styles"]
+__all__ = ["CLI", "executable", "version", "run", "app_holds", "font_styles", "info", "texts", "render"]
 
 CLI = "vectorcraft-cli"
 
@@ -70,3 +70,59 @@ def font_styles(family: str) -> list[str]:
     if not isinstance(result, dict) or result.get("family") is None:
         return []
     return list(result.get("styles") or [])
+
+
+def info(doc: Path) -> dict:
+    """The document summary: artboards [{"name", "rect": [x0, y0, x1, y1]}] in points, fonts [{"family", "style", "status": exact | substitute | missing, "resolved", "missingGlyphs"}], object kinds."""
+    if not executable():
+        raise Unavailable(f"{CLI} is not on PATH; install it (doctor checks the environment)")
+    r = subprocess.run([CLI, "info", str(doc)], capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise Failure(f"{CLI} info could not read {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
+    return json.loads(r.stdout)
+
+
+def texts(doc: Path) -> tuple[list[dict], dict]:
+    """Every type object top-down [{"id", "name", "text", "visible", "bounds": {x, y, width, height}}], and what opening the file reported (missingLinks, modifiedLinks)."""
+    argv = [CLI, "run", "--in", str(doc), "--cmd", "document.inspect"]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise Failure(f"{CLI} could not inspect {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
+    opened, inspected = {}, {}
+    for line in r.stdout.splitlines():
+        if line.startswith("{"):
+            doc_line = json.loads(line)
+            if doc_line.get("step") == "open":
+                opened = doc_line.get("result") or {}
+            elif doc_line.get("command") == "document.inspect":
+                inspected = doc_line.get("result") or {}
+    out = []
+
+    def walk(items):
+        for item in items:
+            if item.get("kind") == "Type":
+                out.append({"id": item.get("id"), "name": item.get("name"), "text": item.get("text", ""), "visible": item.get("visible", True), "bounds": item.get("bounds")})
+            walk(item.get("children") or [])
+
+    walk(inspected.get("layers") or [])
+    return out, {k: opened.get(k, []) for k in ("missingLinks", "modifiedLinks")}
+
+
+def render(doc: Path, out: Path, *, scale: float = 1) -> list[str]:
+    """Export `doc`'s first artboard to an image (format by `out`'s extension) at `scale` pixels per point; returns the export's warnings (text that does not fit its frame, …)."""
+    argv = [CLI, "run", "--in", str(doc), "--export", str(out), "--scale", str(scale)]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise Failure(f"{CLI} could not export {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
+    warnings = []
+    for line in r.stdout.splitlines():
+        if line.startswith("{"):
+            d = json.loads(line)
+            if d.get("step") == "export":
+                warnings += (d.get("result") or {}).get("warnings", [])
+    return warnings
+
+
+def app_holds(doc: Path) -> bool | None:
+    """Whether the running app has `doc` open: True, False (not running, or running without it), or None (running without a control port, so it cannot be asked)."""
+    return False  # 성진: replaced by the control-channel query in the apps step; until then nothing is detected

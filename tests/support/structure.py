@@ -22,14 +22,18 @@ UNITS = {
     "noonnu": "system",
     "photocraft": "system",
     "vectorcraft": "system",
+    "lightcraft": "system",
     "ledger": "store",
     "errors": "helper",
     "paths": "helper",
     "platforms": "helper",
+    "glyphs": "helper",
     "job": "feature",
     "sheet": "feature",
     "generate": "feature",
     "fonts": "feature",
+    "version": "feature",
+    "proof": "feature",
 }
 
 # Imports run one way: features → systems and stores → helpers.
@@ -41,7 +45,7 @@ ALLOWED_KINDS = {
 }
 
 # Features built on another feature: every write to the ledger rebuilds the contact sheet.
-FEATURE_EDGES = {("job", "sheet"), ("generate", "sheet")}
+FEATURE_EDGES = {("job", "sheet"), ("generate", "sheet"), ("version", "sheet")}
 
 SYS_PATH_MUTATORS = {"insert", "append", "extend", "remove", "pop", "clear"}
 

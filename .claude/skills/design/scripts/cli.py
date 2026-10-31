@@ -18,7 +18,8 @@ import json
 import re
 import sys
 
-from design import fonts, generate, ledger, paths, platforms, sheet
+from design import fonts, generate, ledger, paths, platforms, proof, sheet
+from design import version as versions
 from design import job as jobs
 from design.errors import Failure, Usage
 
@@ -34,6 +35,10 @@ COMMANDS = {
     "show": "Summarise one job, or every job's finals and reusable notes and the references (--all)",
     "add": "Record a gpt-image version's prompt (stdin) before generating it",
     "generate": "Generate recorded gpt-image versions through Codex image_gen",
+    "version": "Snapshot the current document (or a photo's develop settings) with its render as the next version",
+    "restore": "Make an earlier version the current document again, keeping unversioned edits first",
+    "proof": "Check sheets: feed-size views, platform zones, 100% crops, fonts and glyphs, strings, strays",
+    "export": "Deliver a version at the platform's size and check it against the platform",
     "record": "Write 성진's notes, Claude's critique, the chosen attempt and the finals",
     "sheet": "Rebuild or open the contact sheet",
     "fonts-search": "Find Korean fonts on noonnu (눈누) by name, use and style",
@@ -89,6 +94,13 @@ def job_type(raw: str):
     if not paths.is_job(path):
         raise argparse.ArgumentTypeError(f"no job at {path} (no job.json); start one with new")
     return path
+
+
+def crop_type(raw: str) -> tuple[int, int, int, int]:
+    m = re.fullmatch(r"(\d+),(\d+),(\d+),(\d+)", raw)
+    if not m or not int(m[3]) or not int(m[4]):
+        raise argparse.ArgumentTypeError(f"expected x,y,w,h in pixels of the render such as 800,200,400,300, got {raw!r}")
+    return tuple(int(m[i]) for i in range(1, 5))
 
 
 def existing_file(raw: str):
@@ -183,6 +195,54 @@ failures: exit 3 if codex is missing or logged out (nothing is attempted); exit 
     p.add_argument("--n", type=int, default=1, choices=range(1, 7), metavar="K", help="images per version, 1-6 (default 1)")
     p.add_argument("--timeout", type=int, default=300, metavar="S", help="seconds before one codex call is stopped and recorded as timeout (default 300)")
 
+    p = command("version", """\
+output: {"summary", "version": N, "snapshot": <versions/vN.pcraft | .vectorcraft | .json>, "render": <versions/vN.png | .jpg>, "sheet", "warnings"?: [...]}
+warnings name linked files that are missing (the render came from the document's cache), VectorCraft export warnings (text that does not fit its frame), and any file in the job of 90 MiB or more (GitHub refuses files over 100 MiB and the vault is pushed there). The first version of a job opens the contact sheet.
+
+failures: exit 1 if the document does not exist, work/ holds no document or several and --doc is missing, or an app CLI fails; exit 2 if --doc is outside work/, --kind does not fit the document, or a grade lacks --photo-id/--photo; exit 3 if the app's CLI is missing.""", details="""\
+Every state 성진 is shown gets a version, so "v18 was better" can be continued from v18's snapshot. The snapshot is a byte copy of the document (a .pcraft or .vectorcraft in work/), or for --kind grade the photo's full develop settings (sliders, curves, masks) read from the job's LightCraft library. The render comes from the snapshot: PhotoCraft updates linked content first (a re-exported photo or SVG shows); a grade is the original developed with the saved settings at a 2400 px long edge (export develops the delivery at full size).""")
+    p.add_argument("job", type=job_type, help="short name under data/ or a path")
+    p.add_argument("--kind", required=True, choices=list(ledger.DOC_KINDS), help="composite (a PhotoCraft composition), layout (a PhotoCraft structure draft with empty slots), vector (a VectorCraft document), grade (a photo developed in LightCraft)")
+    p.add_argument("--direction", required=True, metavar="NAME", help="short memorable name of the direction this version belongs to")
+    p.add_argument("--change", metavar="T", help="what changed against the parent and why")
+    p.add_argument("--parent", type=int, metavar="N", help="the version this one revises")
+    p.add_argument("--doc", metavar="PATH", help="the document in work/ (default: the only .pcraft or .vectorcraft there); for grade, the LightCraft library folder (work/lightcraft)")
+    p.add_argument("--photo-id", type=int, metavar="ID", help="grade: the photo's id in the library, as lightcraft-cli reports it")
+    p.add_argument("--photo", metavar="FILE", help="grade: the photo's original file (in sources/)")
+
+    p = command("restore", """\
+output: the output of version for the new version, with "kept_first"?: {"version", "why"} when edits no version had were versioned before restoring.
+
+failures: exit 5 if an app has the document open, or is running without a control port so it cannot be asked (a disk change would be overwritten by the app's next save); exit 1 if the version does not exist or is a generated one.""", details="""\
+The restored state becomes a new version (restored_from N, parent N); nothing is deleted. Before writing, the document is compared with its latest snapshot: when it differs (성진's edits in an app, or Claude's since the last version) it is versioned first, so restoring never loses work. A grade is restored by resetting the photo's develop settings in the library and applying the saved ones.""")
+    p.add_argument("job", type=job_type, help="short name under data/ or a path")
+    p.add_argument("--version", type=int, required=True, metavar="N", help="the version to make current")
+
+    p = command("proof", f"""\
+output: {{"summary": problems first (font fallback, glyph gaps, brief strings missing, layers outside the canvas, missing links, wrong aspect) then how many sheets to read, "dir": <proof/N/>, "read": [sheets, views first], "render_size", "size"?, "fonts": [{{"layer"?, "requested", "actual", "fallback", "why"?, "missing_glyphs"?}}], "glyph_gaps": [{{"layer", "postscript", "missing": [chars], "blank": [chars]}}], "strings": [{{"layer", "text"}}], "brief_text_missing"?: [...], "outside": [{{"layer", "kind", "where"}}], "missing_links": [...], "platform_notes"?, "export_warnings"?}}
+Sheets: views.png (the render at the widths the platform is commonly seen at, real pixel size), zones.png (what the platform covers or crops, unofficial ones marked), full.png (the render), crop-K.png (each --crop at 100%).
+platforms: {", ".join(sorted(platforms.PLATFORMS))}
+
+failures: exit 1 if the document does not exist or an app CLI fails; exit 2 if --crop leaves the render or the file is not a document or an image.""", details="""\
+Reads the current document (default: the only one in work/), a .pcraft, a .vectorcraft, or any image (a generated attempt, a developed photo). fallback is a type run whose face is not the one asked for: PhotoCraft silently uses Regular for a style the family lacks, so the PostScript name actually used is compared with the family's faces. glyph_gaps are characters the face used has no glyph for (they print in another font) or maps to an empty glyph (they print as a gap). strings are every visible type layer's text, to compare with the brief and 성진's words; brief_text_missing lists brief strings no layer holds. Each call writes a new proof/N/; the folder is disposable.""")
+    p.add_argument("job", type=job_type, help="short name under data/ or a path")
+    p.add_argument("--doc", metavar="PATH", help="the document or image to proof (default: the only .pcraft or .vectorcraft in work/)")
+    p.add_argument("--target", choices=sorted(platforms.PLATFORMS), help="the platform to check against (default: the brief's)")
+    p.add_argument("--crop", action="append", default=[], type=crop_type, metavar="x,y,w,h", help="a region of the render to show at 100%%, in its pixels (cut-out edges, small type, faces); repeatable")
+
+    p = command("export", f"""\
+output: {{"summary", "path", "of", "format", "size": [w, h], "bytes", "target"?, "violations"?: [what the platform states and the file breaks], "warnings"?: [guidance it goes against, missing links], "platform_notes"?}}
+platforms: {"; ".join(f"{n} {p.size[0]}x{p.size[1]} {'/'.join(p.formats)}" for n, p in sorted(platforms.PLATFORMS.items()))}
+
+failures: exit 2 if the delivery size has another aspect than the version (export never crops: make the document in that aspect), or pdf is asked of a non-VectorCraft version; exit 1 if the version or attempt does not exist, the file already exists (exports never overwrite), or an app CLI fails.""", details="""\
+A document version is rendered from its snapshot at the delivery size (PhotoCraft resamples the composition, VectorCraft exports at the scale that gives the width, a grade develops the original at full size or the target's long edge); an attempt (vN-k) is resampled. The file goes to exports/<job>_<name>[_<target>].<ext>, or --to. violations are checked against what the platform publishes (aspect, minimum side, formats, file size); a number from its ad guidance only warns. Finals are recorded separately (record --final).""")
+    p.add_argument("job", type=job_type, help="short name under data/ or a path")
+    p.add_argument("--version", required=True, metavar="NAME", help="vN (a document version) or vN-k (an attempt of a generated version)")
+    p.add_argument("--target", choices=sorted(platforms.PLATFORMS), help="the platform it goes to (default: the brief's); sets the default size and the checks")
+    p.add_argument("--size", type=size_type, metavar="WxH", help="delivery size in pixels (default: the target's, else the version's own)")
+    p.add_argument("--format", choices=["png", "jpg", "pdf"], default=None, help="png, jpg (quality 95, transparency on white) or pdf (VectorCraft only); default jpg for a target that takes it, else png")
+    p.add_argument("--to", metavar="DIR", help="write into this folder instead of the job's exports/ (only when 성진 names one)")
+
     p = command("record", """\
 output: {"written": [...], "finals": [names]}
 
@@ -269,6 +329,17 @@ def run(args: argparse.Namespace, ap: Parser) -> tuple[dict, int]:
     if cmd == "generate":
         result = generate.run(args.job, versions=args.version, n=args.n, timeout=args.timeout)
         return result, 0 if any(r["status"] == "ok" for r in result["results"]) else 1
+    if cmd == "version":
+        return versions.snapshot(args.job, kind=args.kind, direction=args.direction, change=args.change, parent=args.parent, doc=paths.resolve_input(args.doc) if args.doc else None, photo=args.photo_id, photo_file=paths.resolve_input(args.photo) if args.photo else None), 0
+    if cmd == "restore":
+        return versions.restore(args.job, v=args.version), 0
+    if cmd == "proof":
+        doc = paths.resolve_input(args.doc) if args.doc else versions.pick_doc(args.job)
+        return proof.proof(args.job, ledger.read(args.job)["brief"], doc=doc, target=args.target, crops=args.crop), 0
+    if cmd == "export":
+        target = args.target or ledger.read(args.job)["brief"].get("platform")
+        fmt = args.format or ("jpg" if target and "jpg" in platforms.get(target).formats else "png")
+        return versions.export(args.job, name=args.version, target=target, size=args.size, fmt=fmt, to=paths.resolve_input(args.to) if args.to else None), 0
     if cmd == "record":
         if (args.critique is not None or args.chosen) and args.version is None:
             ap.error("record: --critique and --chosen need --version")

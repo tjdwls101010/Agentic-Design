@@ -30,10 +30,10 @@ BRIEF = {"request": (str, True), "purpose": (str, False), "size": (list, False),
 NOTE = {"text": (str, True), "scope": (str, True), "at": (str, True), "version": (int, False)}
 VERSION = {"v": (int, True), "kind": (str, True), "direction": (str, True), "created": (str, True), "parent": (int, False), "change": (str, False), "critique": (str, False),
            # document versions
-           "app": (str, False), "source": (str, False), "snapshot": (str, False), "render": (str, False), "size": (list, False), "from_app": (bool, False), "restored_from": (int, False),
+           "app": (str, False), "source": (str, False), "snapshot": (str, False), "render": (str, False), "size": (list, False), "from_app": (bool, False), "restored_from": (int, False), "photo": (int, False), "photo_file": (str, False),
            # generated versions
            "prompt": (str, False), "refs": (list, False), "aspect": (str, False), "transparent": (bool, False), "attempts": (list, False), "chosen": (str, False)}
-DOC_ONLY = ("app", "source", "snapshot", "render", "size", "from_app", "restored_from")
+DOC_ONLY = ("app", "source", "snapshot", "render", "size", "from_app", "restored_from", "photo", "photo_file")
 GEN_ONLY = ("prompt", "refs", "aspect", "transparent", "attempts", "chosen")
 ATTEMPT = {"id": (str, True), "status": (str, True), "started": (str, True), "pid": (int, False), "elapsed_s": ((int, float), False), "file": (str, False), "w": (int, False), "h": (int, False), "aspect_ok": (bool, False), "alpha": (dict, False), "verbatim": (str, False), "retried": (dict, False), "thread_id": (str, False), "detail": (dict, False)}
 ALPHA = {"has_alpha": (bool, True), "transparent_share": ((int, float), True)}
@@ -131,6 +131,8 @@ def validate(job) -> list[str]:
                     errors.append(f"{where}: a {kind} version has no '{key}'")
             if entry.get("app") is not None and entry["app"] not in APPS:
                 errors.append(f"{where}: app must be one of {list(APPS)}")
+            if entry.get("app") == "lightcraft" and ("photo" not in entry or "photo_file" not in entry):
+                errors.append(f"{where}: a LightCraft version needs 'photo' (its id in the library) and 'photo_file'")
             _size(where, entry.get("size"), errors)
         else:
             for key in ("prompt", "refs", "aspect", "transparent", "attempts"):

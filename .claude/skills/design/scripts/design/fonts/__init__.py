@@ -1,6 +1,6 @@
 """Finding Korean fonts on noonnu and installing font files where PhotoCraft, VectorCraft and LightCraft find them.
 
-Installing converts web formats (woff2, woff) to the desktop format their outlines need (.otf for CFF, .ttf for TrueType), unpacks a distributor's zip, never replaces a file already in the fonts folder, and then asks PhotoCraft and VectorCraft which names they resolve, because those are the names a type layer has to use. Hangul coverage is read from each file's character map: a webfont is often cut to the 2,350 syllables of KS X 1001, and a syllable outside them renders in a fallback font that no font-name check catches.
+Installing converts web formats (woff2, woff) to the desktop format their outlines need (.otf for CFF, .ttf for TrueType), unpacks a distributor's zip, never replaces a file already in the fonts folder, and then asks PhotoCraft and VectorCraft which names they resolve, because those are the names a type layer has to use. Hangul coverage counts the syllables each face actually draws: a webfont is often cut to the 2,350 syllables of KS X 1001, and a syllable outside them renders in a fallback font, or, when the cut kept it in the character map with an empty glyph, as a gap no app reports.
 
 noonnu's own copy of a font (its webfont) is installed only when the font's license allows modifying and redistributing the file (noonnu's OFL row), since converting it is a modification; any other font comes from its distributor's download page as a file.
 """
@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import asdict
 from pathlib import Path
 
-from design import noonnu, paths, photocraft, vectorcraft
+from design import glyphs, noonnu, paths, photocraft, vectorcraft
 from design.errors import BadInput, Failure, Unavailable
 
 __all__ = ["search", "info", "install", "USES", "STYLES"]
@@ -20,8 +20,6 @@ __all__ = ["search", "info", "install", "USES", "STYLES"]
 USES = list(noonnu.USES)
 STYLES = list(noonnu.STYLES)
 FONT_SUFFIXES = (".ttf", ".otf", ".ttc", ".woff", ".woff2")
-HANGUL = range(0xAC00, 0xD7A4)  # every modern syllable, 11,172
-KS_X_1001 = frozenset(c for c in HANGUL if len(chr(c).encode("euc_kr")) == 2)  # the 2,350 a subset keeps
 PLACEHOLDER_FAMILIES = {"WebSubsetFont"}  # the name a subsetting tool gives the cut-down copies some webfonts are
 
 
@@ -44,31 +42,6 @@ def info(font_id: int) -> dict:
     if not doc["webfont_installable"]:
         doc["install_from"] = "the distributor's file: download it from download_page and run fonts install <file>"
     return doc
-
-
-def _coverage(font) -> dict:
-    """Hangul syllables the face actually draws. A web copy cut down to KS X 1001 can keep all 11,172 in its character map and leave the rest as empty glyphs; the apps then draw nothing there, with no fallback and no missing-glyph report."""
-    from fontTools.pens.boundsPen import ControlBoundsPen
-
-    cmap = font.getBestCmap() or {}
-    glyphs = font.getGlyphSet()
-    drawn, blank = set(), 0
-    for c in HANGUL:
-        name = cmap.get(c)
-        if name is None:
-            continue
-        pen = ControlBoundsPen(glyphs)
-        glyphs[name].draw(pen)
-        if pen.bounds is None:
-            blank += 1
-        else:
-            drawn.add(c)
-    out = {"hangul": len(drawn)}
-    if blank:
-        out["hangul_blank"] = blank
-    if 0 < len(drawn) < len(HANGUL):
-        out["missing_ks_x_1001"] = len(KS_X_1001 - drawn)
-    return out
 
 
 def _load(data: bytes, name: str):
@@ -162,7 +135,7 @@ def install(*, font_id: int | None = None, files: list[Path] = (), weights: list
     for name, data in _files_from(sources):
         loaded = _load(data, name)
         for font in loaded:
-            row = {"from": name, **_names(font), **_coverage(font)}
+            row = {"from": name, **_names(font), **glyphs.coverage(font)}
             unnamed = not row["family"] or row["family"] in PLACEHOLDER_FAMILIES
             if unnamed:
                 # An app lists a font by its family name; without a real one it cannot be chosen, and two such files would answer to one name.
@@ -188,7 +161,7 @@ def install(*, font_id: int | None = None, files: list[Path] = (), weights: list
             row.update({"file": str(dest), "status": status})
             if status == "kept_existing":
                 warnings.append(f"{dest.name} already exists with different contents and was kept; compare it with {name} before replacing it by hand")
-            if 0 < row["hangul"] < len(HANGUL):
+            if 0 < row["hangul"] < len(glyphs.HANGUL):
                 warnings.append(f"{row['postscript']}: {row['hangul']} of 11172 Hangul syllables" + (" (every KS X 1001 syllable among them)" if row.get("missing_ks_x_1001") == 0 else "") + "; a syllable outside them renders in a fallback font, so check every string set in it")
             rows.append(row)
             if row["family"] not in families:
