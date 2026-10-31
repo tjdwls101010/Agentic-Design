@@ -13,7 +13,7 @@ PACKAGE = "design"
 
 SKILL_TOP = {"SKILL.md", "references", "data", "scripts"}
 SCRIPTS_TOP = {"cli.py", PACKAGE}
-IGNORED = {"__pycache__", ".DS_Store"}
+IGNORED = {"__pycache__", ".DS_Store", ".claude"}  # .claude: folders Claude Code writes when a session runs inside the tree
 
 # Every unit in the package and what kind it is. A new unit has to be classified here, which is the point.
 UNITS = {
