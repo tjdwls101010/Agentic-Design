@@ -58,9 +58,13 @@ def run(steps: list[tuple[str, dict]], *, file: Path | None = None, new: dict | 
         line = line.strip()
         if line.startswith("{"):
             try:
-                results.append(json.loads(line).get("result"))
+                doc = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(doc, dict) and "command" in doc:
+                results.append(doc.get("result"))
+    if len(results) != len(steps):
+        raise Failure(f"{CLI} run printed {len(results)} results for {len(steps)} steps; its output format may have changed")
     return results
 
 
@@ -77,10 +81,16 @@ UPDATE_LINKS = ("layer.smartObjects.updateAllModifiedContent", {})
 def info(doc: Path) -> dict:
     if not executable():
         raise Unavailable(f"{CLI} is not on PATH; install it (doctor checks the environment)")
-    r = subprocess.run([CLI, "info", str(doc)], capture_output=True, text=True, timeout=300)
+    try:
+        r = subprocess.run([CLI, "info", str(doc)], capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        raise Failure(f"{CLI} info did not finish within 300s") from exc
     if r.returncode != 0:
         raise Failure(f"{CLI} info could not read {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise Failure(f"{CLI} info printed something other than JSON; its output format may have changed ({exc})") from exc
 
 
 def layers(doc_info: dict) -> list[dict]:
@@ -153,7 +163,7 @@ def app_state() -> dict:
         try:
             with control.Channel(int(port), Path(token) if token else None) as ch:
                 session = (ch.result("ui.inspect") or {}).get("session") or {}
-            state["documents"] = [{"path": d.get("path"), "dirty": d.get("dirty"), "active": d.get("index") == session.get("active")} for d in session.get("documents", [])]
+            state["documents"] = [{"path": d.get("path"), "dirty": d.get("dirty"), "active": d.get("index") == session.get("active"), "index": d.get("index")} for d in session.get("documents", [])]
         except (Unavailable, Failure) as exc:
             state["error"] = exc.message
     return state
@@ -240,7 +250,7 @@ def app_save(doc: Path) -> dict:
     with _channel() as ch:
         switched = False
         if not docs[match[0]]["active"]:
-            ch.result("engine.execute", {"command": "document.activate", "params": {"document": match[0]}})
+            ch.result("engine.execute", {"command": "document.activate", "params": {"document": docs[match[0]]["index"]}})
             switched = True
         saved = ch.result("app.save", {})
     if saved and saved.get("path") and Path(saved["path"]).resolve() != target:

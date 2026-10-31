@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import shutil
 import unicodedata
 import uuid
 from pathlib import Path
@@ -60,6 +61,8 @@ def check_name(raw: str) -> None:
     """A new job's short name must read <kind>_<YYMMDD>_<title>, the date a real one. Raises ValueError."""
     raw = nfc(raw.strip())
     m = NAME.fullmatch(raw)
+    if m and is_path(raw):
+        raise ValueError(f"{raw!r}: a job name cannot start with '.', '~' or '/' (it would read as a path)")
     if not m:
         raise ValueError(f"{raw!r}: a new job's short name must read <kind>_<YYMMDD>_<title>, e.g. 썸네일_261031_국정감사")
     try:
@@ -110,6 +113,13 @@ def place_new(dest: Path, write) -> None:
             os.link(tmp, dest)
         except FileExistsError:
             raise Failure(f"{dest} already exists; it is never overwritten") from None
+        except OSError:
+            # A volume without hard links (exFAT, some network shares): an exclusive create still never replaces a file.
+            try:
+                with open(dest, "xb") as out, open(tmp, "rb") as src:
+                    shutil.copyfileobj(src, out)
+            except FileExistsError:
+                raise Failure(f"{dest} already exists; it is never overwritten") from None
     finally:
         tmp.unlink(missing_ok=True)
 

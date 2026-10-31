@@ -444,13 +444,17 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         doc, code = run(args, ap)
-    except Usage as exc:
-        ap.error(exc.message)
-    except Failure as exc:
+    except Failure as exc:  # Usage (2), Unavailable (3), BadInput (4) and Conflict (5) included
         emit(exc.payload())
         return exc.code
     except OSError as exc:
         emit({"error": f"{type(exc).__name__}: {exc}"})
+        return 1
+    except Exception as exc:  # noqa: BLE001 -- a bug must still answer with one JSON document, not a traceback
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        emit({"error": f"unexpected {type(exc).__name__}: {exc}", "note": "a bug in the skill's code; the traceback is on stderr"})
         return 1
     emit(doc)
     return code

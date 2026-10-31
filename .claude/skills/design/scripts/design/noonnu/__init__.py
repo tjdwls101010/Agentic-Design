@@ -124,11 +124,12 @@ def _field(page: str, label: str) -> str | None:
 
 
 def _ofl(description: str) -> str:
-    """The OFL row leaves its status cell empty and says it in the description: "폰트 파일 수정·복제·배포 가능 (단, 유료 판매는 금지)" or "… 모두 금지"."""
-    if "가능" in description:
-        return "allowed"
-    if "금지" in description:
+    """The OFL row leaves its status cell empty and says it in the description: "폰트 파일 수정·복제·배포 가능 (단, 폰트 파일의 유료 판매는 금지)" or "… 모두 금지". The allowed form also says 금지, but only inside its 단, clause about selling."""
+    main = description.split("단,")[0]  # what follows 단, is a restriction on an allowance, not the verdict
+    if "불가" in main or "금지" in main:
         return "not_allowed"
+    if "가능" in main:
+        return "allowed"
     return description
 
 

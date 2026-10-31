@@ -16,7 +16,7 @@ from .legacy import summary as legacy_summary
 from .schema import DOC_KINDS, GEN_KINDS, KINDS, SCHEMA, deliverables, ok_attempts, validate
 from .store import create, edit, exists, now, read
 
-__all__ = ["SCHEMA", "KINDS", "DOC_KINDS", "GEN_KINDS", "create", "edit", "exists", "read", "now", "validate", "ok_attempts", "deliverables", "legacy_summary", "version", "add_version", "new_attempt", "start_attempt", "finish_attempt", "parse_name"]
+__all__ = ["SCHEMA", "KINDS", "DOC_KINDS", "GEN_KINDS", "create", "edit", "exists", "read", "now", "validate", "ok_attempts", "deliverables", "legacy_summary", "version", "latest_for", "add_version", "new_attempt", "start_attempt", "finish_attempt", "parse_name"]
 
 
 def version(job: dict, v: int) -> dict:
@@ -26,9 +26,18 @@ def version(job: dict, v: int) -> dict:
     raise Failure(f"no version {v} in this job (has: {[e['v'] for e in job['versions']] or 'none'})")
 
 
-def add_version(job: dict, fields: dict) -> dict:
-    """Append a version with the next number; `fields` holds everything but v and created (a generated version also gets an empty attempts list)."""
-    entry = {"v": max((e["v"] for e in job["versions"]), default=0) + 1, **fields, "created": now()}
+def latest_for(job: dict, source: str) -> dict | None:
+    """The newest version whose document is `source` (a path as the ledger stores it), or None."""
+    found = [e for e in job["versions"] if e.get("source") == source]
+    return found[-1] if found else None
+
+
+def add_version(job: dict, fields: dict, v: int | None = None) -> dict:
+    """Append a version with the next number (or `v`, which must be free and higher than every other); `fields` holds everything but v and created (a generated version also gets an empty attempts list)."""
+    top = max((e["v"] for e in job["versions"]), default=0)
+    if v is not None and v <= top:
+        raise Failure(f"v{v} is not past the last version (v{top})")
+    entry = {"v": v if v is not None else top + 1, **fields, "created": now()}
     if entry["kind"] in GEN_KINDS:
         entry.setdefault("attempts", [])
     if entry.get("parent") is not None:

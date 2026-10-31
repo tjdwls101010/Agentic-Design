@@ -71,9 +71,12 @@ class Channel:
                 raise Unavailable(f"the app refused the control token: {reply.get('error')}")
 
     def send_line(self, line: str) -> dict:
-        self.file.write(line.rstrip("\n") + "\n")
-        self.file.flush()
-        raw = self.file.readline()
+        try:
+            self.file.write(line.rstrip("\n") + "\n")
+            self.file.flush()
+            raw = self.file.readline()
+        except OSError as exc:  # a read timeout included: the request may still be running in the app
+            return {"ok": False, "error": f"no reply: {exc}"}
         if not raw:
             return {"ok": False, "error": "no reply: the connection closed"}
         try:

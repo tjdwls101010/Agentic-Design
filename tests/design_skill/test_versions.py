@@ -172,3 +172,25 @@ def test_grade_versions_hold_develop_settings_and_restore_them(sandbox):
     assert np.abs(first - again).mean() == 0
     darker = np.asarray(Image.open(job / "versions" / "v2.jpg"), dtype=float)
     assert darker.mean() < first.mean() - 20
+
+
+def test_concurrent_versions_get_their_own_numbers_and_renders(job):
+    second = job.job / "work" / "square.pcraft"
+    assert photocraft("run", "--new", json.dumps({"width": 600, "height": 600}), *steps(("type.create", {"x": 10, "y": 60, "text": "둘", "size": 40})), "--out", str(second)).returncode == 0
+    procs = [job.popen("version", job.job, "--kind", "composite", "--direction", "a", "--doc", doc) for doc in (job.doc, second, job.doc, second)]
+    for p in procs:
+        out, err = p.communicate(timeout=300)
+        assert p.returncode == 0, out + err
+    rows = ledger(job.job)["versions"]
+    assert sorted(r["v"] for r in rows) == [1, 2, 3, 4]
+    for r in rows:
+        with Image.open(job.job / r["render"]) as im:
+            assert list(im.size) == ([1920, 1080] if r["source"] == "work/thumb.pcraft" else [600, 600]) == r["size"]
+    assert not list((job.job / "versions").glob(".staging-*"))
+
+
+def test_a_file_left_by_a_killed_run_is_skipped_not_blocking(job):
+    (job.job / "versions" / "v1.png").write_bytes(b"left behind")
+    r = job.run("version", job.job, "--kind", "composite", "--direction", "a")
+    assert r.code == 0 and r.out["version"] == 2
+    assert (job.job / "versions" / "v1.png").read_bytes() == b"left behind"

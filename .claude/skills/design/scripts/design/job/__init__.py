@@ -77,11 +77,10 @@ def unversioned(job_dir: Path, job: dict) -> list[dict]:
     work = job_dir / "work"
     for doc in sorted(p for p in work.rglob("*") if p.suffix in DOC_SUFFIXES and p.is_file()):
         stored = paths.stored(job_dir, doc)
-        versions = [e for e in job["versions"] if e.get("source") == stored]
-        if not versions:
+        latest = ledger.latest_for(job, stored)
+        if latest is None:
             out.append({"file": stored, "state": "never versioned"})
             continue
-        latest = versions[-1]
         snap = paths.from_stored(job_dir, latest["snapshot"])
         if not snap.is_file() or snap.read_bytes() != doc.read_bytes():
             out.append({"file": stored, "state": f"changed since v{latest['v']}"})
@@ -125,7 +124,9 @@ def show_all() -> dict:
             try:
                 doc = json.loads((d / paths.LEDGER).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                earlier.append({"job": d.name, "error": "job.json does not parse"})
+                doc = None
+            if not isinstance(doc, dict):
+                earlier.append({"job": d.name, "error": "job.json does not parse as a ledger"})
                 continue
             if doc.get("schema") == ledger.SCHEMA:
                 m = paths.NAME.fullmatch(paths.nfc(d.name))

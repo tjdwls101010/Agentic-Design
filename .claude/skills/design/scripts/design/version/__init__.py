@@ -67,27 +67,35 @@ def _copy_new(src: Path, dest: Path) -> None:
 
 
 def _record(job_dir: Path, fields: dict, write_snapshot, ext: str) -> tuple[dict, list[str]]:
-    """Reserve the next version number, write its snapshot and render, then add the row. The files are named after the number the ledger gives, so two versions never share a file."""
-    with ledger.edit(job_dir) as job:
-        v = max((e["v"] for e in job["versions"]), default=0) + 1
-        if fields.get("parent") is not None:
-            ledger.version(job, fields["parent"])
-    snap = job_dir / "versions" / f"v{v}{ext}"
-    write_snapshot(snap)
-    render = job_dir / "versions" / (f"v{v}.jpg" if fields["app"] == "lightcraft" else f"v{v}.png")
+    """Write the snapshot and its render in a private staging folder, then, under the ledger's lock, give them the next free version number and add the row. Numbering at the end means two commands versioning at once never share a number or a render, and a file left by a killed run is skipped rather than blocking the number."""
+    versions = job_dir / "versions"
+    stage = versions / f".staging-{uuid.uuid4().hex[:8]}"
+    stage.mkdir(parents=True)
+    render_ext = ".jpg" if fields["app"] == "lightcraft" else ".png"
+    linked: list[Path] = []
     try:
-        warnings = _render(fields["app"], snap, render, photo_file=paths.from_stored(job_dir, fields["photo_file"]) if fields.get("photo_file") else None)
-        with Image.open(render) as im:
+        if fields.get("parent") is not None:
+            ledger.version(ledger.read(job_dir), fields["parent"])
+        snap_tmp, render_tmp = stage / f"snapshot{ext}", stage / f"render{render_ext}"
+        write_snapshot(snap_tmp)
+        warnings = _render(fields["app"], snap_tmp, render_tmp, photo_file=paths.from_stored(job_dir, fields["photo_file"]) if fields.get("photo_file") else None)
+        with Image.open(render_tmp) as im:
             size = list(im.size)
-    except BaseException:
-        snap.unlink(missing_ok=True)
-        render.unlink(missing_ok=True)
-        raise
-    with ledger.edit(job_dir) as job:
-        if any(e["v"] == v for e in job["versions"]):
-            raise Failure(f"v{v} was taken by another command meanwhile; version again")
-        entry = ledger.add_version(job, {**fields, "snapshot": paths.stored(job_dir, snap), "render": paths.stored(job_dir, render), "size": size})
-    return entry, warnings
+        with ledger.edit(job_dir) as job:
+            v = max((e["v"] for e in job["versions"]), default=0) + 1
+            while any(versions.glob(f"v{v}.*")):
+                v += 1
+            snap, render = versions / f"v{v}{ext}", versions / f"v{v}{render_ext}"
+            for src, dest in ((snap_tmp, snap), (render_tmp, render)):
+                os.link(src, dest)
+                linked.append(dest)
+            entry = ledger.add_version(job, {**fields, "snapshot": paths.stored(job_dir, snap), "render": paths.stored(job_dir, render), "size": size}, v=v)
+        linked.clear()
+        return entry, warnings
+    finally:
+        for dest in linked:  # the ledger refused the row: the files it would have named go too
+            dest.unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def snapshot(job_dir: Path, *, kind: str, direction: str, change: str | None, parent: int | None, doc: Path | None, photo: int | None, photo_file: Path | None, from_app: bool = False) -> dict:
@@ -222,6 +230,8 @@ def export(job_dir: Path, *, name: str, target: str | None, size: list[int] | No
     want = size or (list(platform.size) if platform else native)
     if fmt == "pdf" and entry.get("app") != "vectorcraft":
         raise Usage("pdf export is for VectorCraft documents (print and vector deliveries); export png or jpg otherwise")
+    if fmt == "pdf" and size:
+        raise Usage("a pdf is written at the artboard's own size; --size is for png and jpg")
     if native and want and not _aspect_ok(want, native) and fmt != "pdf":
         raise Usage(f"{name} is {native[0]}x{native[1]} and the delivery is {want[0]}x{want[1]}: a different aspect. Export does not crop; make the document in the delivery's aspect (or give --size in its own aspect)")
     tmp = dest.with_name(f".{dest.stem}.{uuid.uuid4().hex[:8]}{'.png' if fmt == 'jpg' else ext}")
@@ -236,7 +246,10 @@ def export(job_dir: Path, *, name: str, target: str | None, size: list[int] | No
             photocraft.render(snap, tmp, size=tuple(want) if want != native else None)
         elif entry["app"] == "vectorcraft":
             snap = paths.from_stored(job_dir, entry["snapshot"])
-            board = vectorcraft.info(snap)["artboards"][0]["rect"]
+            boards = vectorcraft.info(snap).get("artboards") or []
+            if not boards:
+                raise Failure(f"{snap.name} has no artboard to export")
+            board = boards[0]["rect"]
             warnings += vectorcraft.render(snap, tmp, scale=1 if fmt == "pdf" else want[0] / (board[2] - board[0]))
         else:
             lightcraft.render(paths.from_stored(job_dir, entry["photo_file"]), tmp, settings_file=paths.from_stored(job_dir, entry["snapshot"]), long_edge=max(want) if size or platform else 0)
@@ -252,7 +265,12 @@ def export(job_dir: Path, *, name: str, target: str | None, size: list[int] | No
         paths.place_new(dest, lambda t: shutil.copyfile(tmp, t))
     finally:
         tmp.unlink(missing_ok=True)
-    final_size = list(Image.open(dest).size) if fmt != "pdf" else want
+    if fmt == "pdf":
+        board = vectorcraft.info(paths.from_stored(job_dir, entry["snapshot"]))["artboards"][0]["rect"]
+        final_size = [round(board[2] - board[0]), round(board[3] - board[1])]  # points
+    else:
+        with Image.open(dest) as im:
+            final_size = list(im.size)
     nbytes = dest.stat().st_size
     violations, soft = platforms.violations(platform, final_size[0], final_size[1], nbytes, fmt) if platform and fmt != "pdf" else ([], [])
     warnings += soft

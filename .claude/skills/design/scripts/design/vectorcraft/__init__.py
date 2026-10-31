@@ -14,7 +14,7 @@ from pathlib import Path
 from design import control
 from design.errors import Failure, Unavailable
 
-__all__ = ["CLI", "executable", "version", "run", "app_holds", "app_state", "app_launch", "app_send", "app_save", "font_styles", "info", "texts", "render"]
+__all__ = ["CLI", "executable", "version", "run", "app_holds", "app_state", "app_launch", "app_send", "app_save", "font_styles", "info", "texts", "text_runs", "render"]
 
 CLI = "vectorcraft-cli"
 
@@ -64,7 +64,7 @@ def run(steps: list[tuple[str, dict]], *, file: Path | None = None, exports: lis
 def font_styles(family: str) -> list[str]:
     """The styles VectorCraft lists under a family name; empty when it does not know the family."""
     try:
-        (result,) = run([("text.fontList", {"family": family})])
+        result = (run([("text.fontList", {"family": family})]) or [None])[0]
     except Failure as exc:
         if "is not available" in exc.message:  # an unknown family is a parameter error to VectorCraft
             return []
@@ -74,30 +74,48 @@ def font_styles(family: str) -> list[str]:
     return list(result.get("styles") or [])
 
 
-def info(doc: Path) -> dict:
-    """The document summary: artboards [{"name", "rect": [x0, y0, x1, y1]}] in points, fonts [{"family", "style", "status": exact | substitute | missing, "resolved", "missingGlyphs"}], object kinds."""
+def _call(argv: list[str], what: str, timeout: float = 600) -> str:
     if not executable():
         raise Unavailable(f"{CLI} is not on PATH; install it (doctor checks the environment)")
-    r = subprocess.run([CLI, "info", str(doc)], capture_output=True, text=True, timeout=300)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise Failure(f"{CLI} {what} did not finish within {timeout:.0f}s") from exc
     if r.returncode != 0:
-        raise Failure(f"{CLI} info could not read {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
-    return json.loads(r.stdout)
+        raise Failure(f"{CLI} could not {what}: {(r.stderr or r.stdout).strip()[-400:]}")
+    return r.stdout
+
+
+def _lines(stdout: str) -> list[dict]:
+    out = []
+    for line in stdout.splitlines():
+        if line.strip().startswith("{"):
+            try:
+                doc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(doc, dict):
+                out.append(doc)
+    return out
+
+
+def info(doc: Path) -> dict:
+    """The document summary: artboards [{"name", "rect": [x0, y0, x1, y1]}] in points, fonts [{"family", "style", "status": exact | substitute | missing, "resolved", "missingGlyphs"}], object kinds."""
+    out = _call([CLI, "info", str(doc)], f"read {doc.name}", 300)
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise Failure(f"{CLI} info printed something other than JSON; its output format may have changed ({exc})") from exc
 
 
 def texts(doc: Path) -> tuple[list[dict], dict]:
     """Every type object top-down [{"id", "name", "text", "visible", "bounds": {x, y, width, height}}], and what opening the file reported (missingLinks, modifiedLinks)."""
-    argv = [CLI, "run", "--in", str(doc), "--cmd", "document.inspect"]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
-    if r.returncode != 0:
-        raise Failure(f"{CLI} could not inspect {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
     opened, inspected = {}, {}
-    for line in r.stdout.splitlines():
-        if line.startswith("{"):
-            doc_line = json.loads(line)
-            if doc_line.get("step") == "open":
-                opened = doc_line.get("result") or {}
-            elif doc_line.get("command") == "document.inspect":
-                inspected = doc_line.get("result") or {}
+    for doc_line in _lines(_call([CLI, "run", "--in", str(doc), "--cmd", "document.inspect"], f"inspect {doc.name}", 300)):
+        if doc_line.get("step") == "open":
+            opened = doc_line.get("result") or {}
+        elif doc_line.get("command") == "document.inspect":
+            inspected = doc_line.get("result") or {}
     out = []
 
     def walk(items):
@@ -112,17 +130,22 @@ def texts(doc: Path) -> tuple[list[dict], dict]:
 
 def render(doc: Path, out: Path, *, scale: float = 1) -> list[str]:
     """Export `doc`'s first artboard to an image (format by `out`'s extension) at `scale` pixels per point; returns the export's warnings (text that does not fit its frame, …)."""
-    argv = [CLI, "run", "--in", str(doc), "--export", str(out), "--scale", str(scale)]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
-    if r.returncode != 0:
-        raise Failure(f"{CLI} could not export {doc}: {(r.stderr or r.stdout).strip()[-400:]}")
     warnings = []
-    for line in r.stdout.splitlines():
-        if line.startswith("{"):
-            d = json.loads(line)
-            if d.get("step") == "export":
-                warnings += (d.get("result") or {}).get("warnings", [])
+    for d in _lines(_call([CLI, "run", "--in", str(doc), "--export", str(out), "--scale", str(scale)], f"export {doc.name}")):
+        if d.get("step") == "export":
+            warnings += (d.get("result") or {}).get("warnings", [])
     return warnings
+
+
+def text_runs(doc: Path, ids: list[int]) -> dict[int, list[dict]]:
+    """Each type object's style runs: {"text", "family", "style"} as stored."""
+    if not ids:
+        return {}
+    argv = [CLI, "run", "--in", str(doc)]
+    for i in ids:
+        argv += ["--cmd", "text.getRange", "--params", json.dumps({"id": i})]
+    results = [d.get("result") or {} for d in _lines(_call(argv, f"read the type of {doc.name}", 300)) if d.get("command") == "text.getRange"]
+    return {i: [{"text": r.get("text", ""), "family": (r.get("style") or {}).get("font_family"), "style": (r.get("style") or {}).get("font_style")} for r in res.get("runs", [])] for i, res in zip(ids, results)}
 
 
 
@@ -219,10 +242,14 @@ def app_save(doc: Path) -> dict:
     match = [i for i, d in enumerate(docs) if d.get("title") == doc.name]
     if not match:
         raise Failure(f"VectorCraft does not have {doc.name} open; version the file on disk instead")
+    if len(match) > 1:
+        raise Failure(f"VectorCraft has {len(match)} documents titled {doc.name} and names none by path, so which one to save cannot be told; ask 성진 to close the others")
     with _channel() as ch:
         switched = False
         if not docs[match[0]]["active"]:
             ch.result("engine.execute", {"command": "document.activate", "params": {"index": match[0]}})
             switched = True
-        ch.result("app.save", {"wait": True})
+        saved = ch.result("app.save", {"wait": True}) or {}
+    if isinstance(saved, dict) and saved.get("path") and Path(saved["path"]).resolve() != doc.resolve():
+        raise Failure(f"VectorCraft saved {saved['path']}, not {doc}; check the app before going on")
     return {"saved": str(doc), "switched_active_document": switched}

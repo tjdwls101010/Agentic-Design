@@ -40,7 +40,7 @@ def test_status_reports_what_photocraft_has_open(sandbox, running):
     r = sandbox.run("apps-status")
     assert r.code == 0, r.raw
     pc = next(a for a in r.out["apps"] if a["app"] == "photocraft")
-    assert pc["running"] is True and pc["documents"] == [{"path": str(doc), "dirty": False, "active": True}]
+    assert pc["running"] is True and pc["documents"] == [{"path": str(doc), "dirty": False, "active": True, "index": 0}]
 
 
 def test_an_app_without_a_control_port_is_flagged(sandbox, running):

@@ -65,3 +65,12 @@ def test_webfont_through_an_imported_stylesheet():
 def test_a_page_without_the_license_table_says_noonnu_changed():
     with pytest.raises(noonnu.Changed, match="license summary table"):
         noonnu.parse_font("<html><h2>이름</h2></html>", 1)
+
+
+def test_the_ofl_verdict_reads_the_main_clause():
+    from design.noonnu import parse_font
+
+    page = page_with = (PAGES / "font_page_694.html").read_text(encoding="utf-8")
+    page = page.replace("폰트 파일 수정·복제·배포 가능", "폰트 파일 수정·복제·배포 불가능")
+    assert parse_font(page, 694).license["ofl"] == "not_allowed"
+    assert parse_font(page_with, 694).license["ofl"] == "allowed"

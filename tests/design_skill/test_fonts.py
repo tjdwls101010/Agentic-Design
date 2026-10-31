@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -135,3 +136,48 @@ def test_search_by_filters_and_by_name(sandbox):
     assert r.code == 0 and len(r.out["fonts"]) == 24 and "category_use_ids" in r.out["url"]
     r = sandbox.run("fonts-search", "프리텐다드")
     assert r.code == 0 and 694 in [f["id"] for f in r.out["fonts"]]
+
+
+def test_a_hostile_postscript_name_cannot_leave_the_fonts_folder(sandbox):
+    from fontTools.ttLib import TTFont
+
+    src = build(sandbox.root / "evil.woff", family="Evil", flavor="woff")
+    font = TTFont(src)
+    for record in font["name"].names:
+        if record.nameID == 6:
+            record.string = "../escaped"
+    font.save(src)
+    r = sandbox.run("fonts-install", "--file", src)
+    assert r.code == 0, r.raw
+    installed = Path(r.out["fonts"][0]["file"])
+    assert installed.parent == sandbox.fonts and installed.name == "escaped.ttf"
+    assert not (sandbox.root / "escaped.ttf").exists()
+
+
+def test_a_collection_goes_in_whole_or_not_at_all(sandbox):
+    from fontTools.ttLib import TTCollection, TTFont
+
+    good = build(sandbox.root / "g.ttf", family="Coll Good")
+    gappy = build(sandbox.root / "b.ttf", family="Coll Gappy", chars="가", blank="똠")
+    coll = TTCollection()
+    coll.fonts = [TTFont(good), TTFont(gappy)]
+    path = sandbox.root / "pair.ttc"
+    coll.save(str(path))
+    r = sandbox.run("fonts-install", "--file", path)
+    assert r.code == 1 and r.out["fonts"][0]["status"] == "refused"
+    assert list(sandbox.fonts.iterdir()) == []
+    coll.fonts = [TTFont(good), TTFont(build(sandbox.root / "g2.ttf", family="Coll Good", style="Bold"))]
+    coll.save(str(path))
+    r = sandbox.run("fonts-install", "--file", path)
+    assert r.code == 0 and [p.name for p in sandbox.fonts.iterdir()] == ["pair.ttc"]
+
+
+def test_damaged_inputs_are_bad_input_not_a_traceback(sandbox):
+    empty = sandbox.root / "empty.ttf"
+    empty.write_bytes(b"\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    r = sandbox.run("fonts-install", "--file", empty)
+    assert r.code == 4 and r.out and "error" in r.out
+    bad = sandbox.root / "bad.zip"
+    bad.write_bytes(b"PK\x03\x04 not really a zip")
+    r = sandbox.run("fonts-install", "--file", bad)
+    assert r.code == 4 and "zip" in r.out["error"]

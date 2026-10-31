@@ -41,8 +41,17 @@ def run(library: Path, commands: list[tuple[str, dict]], timeout: float = 600) -
     if not executable():
         raise Unavailable(f"{CLI} is not on PATH; install it (doctor checks the environment)")
     script = "\n".join(json.dumps({"command": c, "params": p}, ensure_ascii=False) for c, p in commands) + "\n"
-    r = subprocess.run([CLI, "run", "--library", str(library), "--script", "-"], input=script, capture_output=True, text=True, timeout=timeout)
-    lines = [json.loads(l) for l in r.stdout.splitlines() if l.strip().startswith("{")]
+    try:
+        r = subprocess.run([CLI, "run", "--library", str(library), "--script", "-"], input=script, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise Failure(f"{CLI} run did not finish within {timeout:.0f}s") from exc
+    lines = []
+    for l in r.stdout.splitlines():
+        if l.strip().startswith("{"):
+            try:
+                lines.append(json.loads(l))
+            except json.JSONDecodeError:
+                continue
     failed = [l for l in lines if not l.get("ok")]
     if failed or r.returncode != 0:
         first = failed[0] if failed else {}
@@ -52,7 +61,9 @@ def run(library: Path, commands: list[tuple[str, dict]], timeout: float = 600) -
 
 def settings(library: Path, photo_id: str) -> dict:
     """A photo's full develop settings (sliders, curves, masks) as LightCraft stores them."""
-    (result,) = run(library, [("develop.get", {"id": photo_id})])
+    result = (run(library, [("develop.get", {"id": photo_id})]) or [None])[0]
+    if not isinstance(result, dict):
+        raise Failure(f"LightCraft returned no develop settings for photo {photo_id}")
     return result
 
 
@@ -73,7 +84,10 @@ def render(photo: Path, out: Path, *, settings_file: Path, long_edge: int = 0, q
     argv = [CLI, "render", str(photo), "-o", str(out), "--settings", str(settings_file), "--quality", str(quality), "--opt", "bitDepth=8", "--opt", "colorSpace=srgb"]
     if long_edge:
         argv += ["--size", str(long_edge)]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise Failure(f"{CLI} render did not finish within 600s") from exc
     if r.returncode != 0:
         raise Failure(f"{CLI} render failed: {r.stderr.strip()[-400:]}")
 
@@ -163,7 +177,7 @@ def prompt_matte(photo: Path, text: str, width: int, height: int) -> tuple[np.nd
     """What SAM 3 selects in `photo` for an English description, as an 8-bit matte of width×height over the upright photo. The model understands English only; a description it finds nothing for is a Failure. The stored grid is coarse (a few hundred cells a side), so edges are soft at full resolution; the second value is how many photo pixels one cell spans."""
     with tempfile.TemporaryDirectory(prefix="design-sam-") as tmp:
         library = Path(tmp) / "library"
-        (result,) = run(library, [("library.import", {"paths": [str(photo)], "mode": "add"})])[:1]
+        result = (run(library, [("library.import", {"paths": [str(photo)], "mode": "add"})]) or [None])[0]
         if not (result or {}).get("imported"):
             raise Failure(f"LightCraft could not import {photo.name} to analyse it: {result}")
         try:
@@ -196,9 +210,15 @@ def sam_status() -> dict:
     """{"installed": bool, "detail"?}: whether LightCraft's SAM 3 model (Object and Describe masks) is in place."""
     if not executable():
         return {"installed": False, "detail": f"{CLI} is not on PATH"}
-    r = subprocess.run([CLI, "run", "segment.model.status"], capture_output=True, text=True, timeout=60)
+    try:
+        r = subprocess.run([CLI, "run", "segment.model.status"], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"installed": False, "detail": f"{CLI} did not answer within 60s"}
     for line in r.stdout.splitlines():
         if line.strip().startswith("{"):
-            result = (json.loads(line).get("result") or {})
+            try:
+                result = json.loads(line).get("result") or {}
+            except (json.JSONDecodeError, AttributeError):
+                continue
             return {"installed": bool(result.get("installed")), "dir": result.get("dir")}
     return {"installed": False, "detail": r.stderr.strip()[-200:]}

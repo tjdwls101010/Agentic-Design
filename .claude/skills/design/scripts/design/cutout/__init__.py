@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
-from design import lightcraft, paths, photocraft, vision
+from design import ledger, lightcraft, paths, photocraft, vision
 from design.errors import BadInput, Conflict, Failure, Usage
 
 __all__ = ["cutout"]
@@ -87,7 +87,11 @@ def _attach(doc: Path, layer_name: str, src: Path, matte: Image.Image, scratch: 
     layer = layers[0]
     if layer.get("linked") and Path(layer["linked"]).resolve() != src.resolve():
         raise Failure(f"layer {layer_name!r} links {layer['linked']}, not {src}; the matte belongs to the photo it was made from")
+    if not layer.get("bounds"):
+        raise Failure(f"layer {layer_name!r} is a {layer['kind']} with no pixel bounds; name the photo's own layer")
     x, y, w, h = layer["bounds"]
+    if abs((w / h) / (matte.width / matte.height) - 1) > 0.01:
+        raise Failure(f"layer {layer_name!r} is {w}x{h} on the canvas, not the photo's {matte.width}:{matte.height} shape: it is cropped, rotated or clipped, so the matte would not line up. Put the photo in whole (linked, scaled only) or attach the matte in the app", bounds=[x, y, w, h])
     # 성진: bounds place the matte for a scaled, unrotated layer; a rotated or skewed smart object needs its transform matrix, which info does not give.
     canvas = Image.new("L", (info["width"], info["height"]), 0)
     canvas.paste(matte.resize((round(w), round(h)), Image.LANCZOS), (round(x), round(y)))
@@ -102,6 +106,17 @@ def _attach(doc: Path, layer_name: str, src: Path, matte: Image.Image, scratch: 
     finally:
         canvas_path.unlink(missing_ok=True)
     return {"doc": str(doc), "layer": layer_name, "placed_at": [x, y, w, h]}
+
+
+def _guard_hand_edits(job_dir: Path, doc: Path, layer_name: str) -> None:
+    """Replacing a layer's mask throws away whatever was painted into it; when the document holds edits no version has, that may be 성진's hand work, so it is versioned first."""
+    latest = ledger.latest_for(ledger.read(job_dir), paths.stored(job_dir, doc))
+    if latest is not None and paths.from_stored(job_dir, latest["snapshot"]).read_bytes() == doc.read_bytes():
+        return
+    info = photocraft.info(doc)
+    target = [l for l in photocraft.layers(info) if l["name"] == layer_name]
+    if target and _has_mask(info, target[0]["id"]):
+        raise Conflict(f"layer {layer_name!r} already has a mask and {doc.name} holds edits no version has (perhaps a mask painted by hand); version the document first, then cut again")
 
 
 def _has_mask(info: dict, layer_id: int) -> bool:
@@ -141,9 +156,14 @@ def cutout(job_dir: Path, src: Path, *, kind: str, instance: int | None, select:
     if doc is not None:
         if layer is None:
             raise Usage("--doc needs --layer: the name of the photo's layer in that document")
+        try:
+            doc.resolve().relative_to((job_dir / "work").resolve())
+        except ValueError:
+            raise Usage(f"{doc} is not in this job's work/; the matte goes on the current document, never on a version's snapshot or another job's file") from None
         held = photocraft.app_holds(doc)
         if held is not False:
             raise Conflict(f"PhotoCraft {'has' if held else 'may have'} {doc.name} open: a mask written on disk would be overwritten by the app's next save. Ask 성진 to save and close it, then run this again")
+        _guard_hand_edits(job_dir, doc, layer)
         result["attached"] = _attach(doc, layer, src, Image.fromarray(matte), job_dir / "etc")
         result["summary"] += f"; mask on layer {layer!r} of {doc.name}"
     result["next"] = "look at the edge at 100% (proof --crop on hair, hands, glasses, held objects); fix the mask in the app or with a corrected --matte"

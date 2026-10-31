@@ -10,7 +10,7 @@ from pathlib import Path
 
 from design import paths
 
-__all__ = ["HANGUL", "KS_X_1001", "drawn", "coverage", "find", "gaps"]
+__all__ = ["HANGUL", "KS_X_1001", "drawn", "coverage", "find", "find_face", "gaps"]
 
 HANGUL = range(0xAC00, 0xD7A4)  # every modern syllable, 11,172
 KS_X_1001 = frozenset(c for c in HANGUL if len(chr(c).encode("euc_kr")) == 2)  # the 2,350 a cut-down copy keeps
@@ -55,11 +55,11 @@ def _folders() -> list[Path]:
 
 
 @lru_cache(maxsize=1)
-def _index() -> dict[str, tuple[str, int]]:
-    """PostScript name → (file, index in a collection), over every font file the folders hold. Built once per process."""
+def _index() -> dict:
+    """PostScript name, and (family, style) by both the typographic and the legacy names, → (file, index in a collection), over every font file the folders hold. Built once per process."""
     from fontTools.ttLib import TTCollection, TTFont
 
-    index: dict[str, tuple[str, int]] = {}
+    index: dict = {}
     for folder in _folders():
         if not folder.is_dir():
             continue
@@ -69,9 +69,13 @@ def _index() -> dict[str, tuple[str, int]]:
             try:
                 faces = TTCollection(str(path), lazy=True).fonts if path.suffix.lower() == ".ttc" else [TTFont(str(path), lazy=True)]
                 for i, face in enumerate(faces):
-                    ps = face["name"].getDebugName(6)
+                    names = face["name"]
+                    ps = names.getDebugName(6)
                     if ps:
                         index.setdefault(ps, (str(path), i))
+                    for fam, sty in ((names.getDebugName(16), names.getDebugName(17)), (names.getDebugName(1), names.getDebugName(2))):
+                        if fam and sty:
+                            index.setdefault((fam, sty), (str(path), i))
             except Exception:  # noqa: BLE001 -- one unreadable file must not hide the rest
                 continue
     return index
@@ -81,11 +85,15 @@ def find(postscript: str) -> tuple[str, int] | None:
     return _index().get(postscript)
 
 
-def gaps(postscript: str, text: str) -> dict | None:
-    """Characters of `text` the face named `postscript` does not draw: {"missing": [chars it has no glyph for], "blank": [chars it maps to an empty glyph]}, or None when the face's file is not found. Spaces and line breaks are skipped."""
+def find_face(family: str, style: str) -> tuple[str, int] | None:
+    return _index().get((family, style))
+
+
+def gaps(postscript: str, text: str, *, where: tuple[str, int] | None = None) -> dict | None:
+    """Characters of `text` the face named `postscript` (or found at `where`) does not draw: {"missing": [chars it has no glyph for], "blank": [chars it maps to an empty glyph]}, or None when the face's file is not found. Spaces and line breaks are skipped."""
     from fontTools.ttLib import TTCollection, TTFont
 
-    where = find(postscript)
+    where = where or find(postscript)
     if where is None:
         return None
     path, i = where

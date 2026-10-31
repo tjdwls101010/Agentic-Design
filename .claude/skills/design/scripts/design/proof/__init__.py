@@ -114,8 +114,21 @@ def _photocraft_checks(doc: Path) -> dict:
 def _vectorcraft_checks(doc: Path) -> dict:
     info = vectorcraft.info(doc)
     texts, opened = vectorcraft.texts(doc)
-    fonts = [{"requested": f"{f['family']} {f['style']}", "actual": f"{f['resolved']['family']} {f['resolved']['style']}", "fallback": f["status"] != "exact", "missing_glyphs": f.get("missingGlyphs", 0)} for f in info.get("fonts", [])]
-    return {"fonts": fonts, "glyph_gaps": [], "strings": [{"layer": t["name"], "text": t["text"]} for t in texts if t["visible"]], "outside": [], "missing_links": opened.get("missingLinks", [])}
+    fonts = []
+    for f in info.get("fonts", []):
+        resolved = f.get("resolved") or {}
+        fonts.append({"requested": f"{f.get('family')} {f.get('style')}", "actual": f"{resolved.get('family')} {resolved.get('style')}" if resolved else "none", "fallback": f.get("status") != "exact", "missing_glyphs": f.get("missingGlyphs", 0)})
+    # VectorCraft counts characters a face lacks, but not ones it maps to an empty glyph, so the face's file is read too.
+    gaps = []
+    runs = vectorcraft.text_runs(doc, [t["id"] for t in texts if t["visible"]])
+    names = {t["id"]: t["name"] for t in texts}
+    for tid, rows in runs.items():
+        for run in rows:
+            where = glyphs.find_face(run["family"], run["style"]) if run["family"] and run["style"] else None
+            gap = glyphs.gaps("", run["text"], where=where) if where else None
+            if gap and (gap["missing"] or gap["blank"]):
+                gaps.append({"layer": names.get(tid), "face": f"{run['family']} {run['style']}", **gap})
+    return {"fonts": fonts, "glyph_gaps": gaps, "strings": [{"layer": t["name"], "text": t["text"]} for t in texts if t["visible"]], "outside": [], "missing_links": opened.get("missingLinks", [])}
 
 
 def _missing_brief_text(brief: list[str], strings: list[dict]) -> list[str]:
@@ -171,6 +184,9 @@ def proof(job_dir: Path, brief: dict, *, doc: Path, target: str | None, crops: l
     fallback = [f for f in checks.get("fonts", []) if f["fallback"]]
     if fallback:
         problems.append(f"{len(fallback)} font run(s) fell back: " + "; ".join(f"{f.get('layer', '')} asked {f['requested']}, got {f['actual']}" for f in fallback))
+    lacking = [f for f in checks.get("fonts", []) if f.get("missing_glyphs")]
+    if lacking:
+        problems.append("characters a face lacks: " + "; ".join(f"{f['requested']}: {f['missing_glyphs']}" for f in lacking))
     if checks.get("glyph_gaps"):
         problems.append("characters the face does not draw: " + "; ".join(f"{g['layer']}: {''.join(g['missing'] + g['blank'])}" for g in checks["glyph_gaps"]))
     if result.get("brief_text_missing"):

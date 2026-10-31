@@ -64,7 +64,10 @@ def test_a_given_matte_lands_in_the_layer_mask_where_the_photo_is_placed(job):
         cx, cy = canvas(*outside)
         assert alpha[cy, cx] < 15, outside
     r = job.run("cutout", job.job, src, "--matte", matte_path, "--doc", doc, "--layer", "one")
-    assert r.code == 0 and Path(r.out["matte"]).name == "one_matte-2.png"  # a second cut replaces the mask and keeps the first matte file
+    assert r.code == 5 and "version the document first" in r.out["error"]  # the mask now there may hold hand edits no version has
+    assert job.run("version", job.job, "--kind", "composite", "--direction", "a").code == 0
+    r = job.run("cutout", job.job, src, "--matte", matte_path, "--doc", doc, "--layer", "one")
+    assert r.code == 0 and Path(r.out["matte"]).name == "one_matte-3.png"  # a second cut replaces the mask and keeps the earlier matte files
 
 
 def test_vision_keeps_the_one_person_marked_by_hand(job):
@@ -103,6 +106,18 @@ def test_a_described_person_is_kept_and_the_other_is_not(job):
     assert mean_in(matte, PAIR_RIGHT_FACE) > 200 and mean_in(matte, PAIR_LEFT_FACE) < 30
     r = job.run("cutout", job.job, job.job / "sources" / "pair.jpg", "--select", "흰 머리 남자")
     assert r.code == 1 and "English" in r.out["error"]
+
+
+def test_the_matte_goes_only_on_a_document_in_work(job):
+    need("photocraft-cli")
+    src = job.job / "sources" / "one.jpg"
+    snap = job.job / "versions" / "v9.pcraft"
+    assert photocraft("run", "--new", json.dumps({"width": 1200, "height": 800}), *steps(("file.placeLinked", {"path": str(src)})), "--out", str(snap)).returncode == 0
+    before = snap.read_bytes()
+    matte = job.root / "m.png"
+    Image.new("L", (1200, 800), 255).save(matte)
+    r = job.run("cutout", job.job, src, "--matte", matte, "--doc", snap, "--layer", "one")
+    assert r.code == 2 and "work/" in r.out["error"] and snap.read_bytes() == before
 
 
 def test_no_person_and_bad_arguments(job):
