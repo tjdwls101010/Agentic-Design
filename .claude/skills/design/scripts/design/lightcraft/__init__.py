@@ -1,18 +1,23 @@
 """lightcraft-cli, the headless LightCraft (a Lightroom clone), as the skill uses it: a photo's develop settings in a job's library, read and written back, and the developed photo exported.
 
-What LightCraft owns stays in here: the CLI's argv, its `{"command", "ok", "result" | "error"}` lines, the library flag, and how a photo is named (its id). Callers get settings as a dict and files on disk.
+What LightCraft owns stays in here: the CLI's argv, its `{"command", "ok", "result" | "error"}` lines, the library flag, how a photo is named (its id), and how it stores a SAM 3 selection (a square grid of logits over the upright photo, quantized, deflated and base64 encoded). Callers get settings as a dict, mattes as arrays and files on disk.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import subprocess
+import tempfile
+import zlib
 from pathlib import Path
+
+import numpy as np
 
 from design.errors import Failure, Unavailable
 
-__all__ = ["CLI", "executable", "version", "run", "app_holds", "settings", "restore_settings", "export", "render"]
+__all__ = ["CLI", "executable", "version", "run", "app_holds", "settings", "restore_settings", "export", "render", "prompt_matte"]
 
 CLI = "lightcraft-cli"
 
@@ -74,3 +79,64 @@ def render(photo: Path, out: Path, *, settings_file: Path, long_edge: int = 0, q
 def app_holds(doc: Path) -> bool | None:
     """Whether the running app has `doc` open: True, False (not running, or running without it), or None (running without a control port, so it cannot be asked)."""
     return False  # 성진: replaced by the control-channel query in the apps step; until then nothing is detected
+
+
+LOGIT_SCALE = 8.0  # stored logits are steps of 1/8
+
+
+def _logits(seg: dict) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    side = int(seg["side"])
+    raw = zlib.decompress(base64.b64decode(seg["data"]), -15)  # raw deflate, no zlib header
+    if len(raw) != side * side:
+        raise Failure(f"LightCraft's stored selection has {len(raw)} cells, not {side}x{side}; its storage format may have changed")
+    grid = np.frombuffer(raw, dtype=np.int8).astype(np.float32).reshape(side, side) / LOGIT_SCALE
+    return grid, tuple(seg.get("rect") or (0.0, 0.0, 1.0, 1.0))
+
+
+def _sample(grid: np.ndarray, rect, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    """Bilinear logits at every pixel centre of a width×height image, as LightCraft samples them, and where the grid covers."""
+    side = grid.shape[0]
+    xs = ((np.arange(width) + 0.5) / width - rect[0]) / (rect[2] - rect[0])
+    ys = ((np.arange(height) + 0.5) / height - rect[1]) / (rect[3] - rect[1])
+    fx = np.clip(xs * side - 0.5, 0, side - 1)
+    fy = np.clip(ys * side - 0.5, 0, side - 1)
+    x0, y0 = np.floor(fx).astype(int), np.floor(fy).astype(int)
+    x1, y1 = np.minimum(x0 + 1, side - 1), np.minimum(y0 + 1, side - 1)
+    tx, ty = (fx - x0)[None, :], (fy - y0)[:, None]
+    top = grid[y0][:, x0] * (1 - tx) + grid[y0][:, x1] * tx
+    bot = grid[y1][:, x0] * (1 - tx) + grid[y1][:, x1] * tx
+    inside = ((xs >= 0) & (xs <= 1))[None, :] & ((ys >= 0) & (ys <= 1))[:, None]
+    return top * (1 - ty) + bot * ty, inside
+
+
+def prompt_matte(photo: Path, text: str, width: int, height: int) -> tuple[np.ndarray, float]:
+    """What SAM 3 selects in `photo` for an English description, as an 8-bit matte of width×height over the upright photo. The model understands English only; a description it finds nothing for is a Failure. The stored grid is coarse (a few hundred cells a side), so edges are soft at full resolution; the second value is how many photo pixels one cell spans."""
+    with tempfile.TemporaryDirectory(prefix="design-sam-") as tmp:
+        library = Path(tmp) / "library"
+        (result,) = run(library, [("library.import", {"paths": [str(photo)], "mode": "add"})])[:1]
+        if not (result or {}).get("imported"):
+            raise Failure(f"LightCraft could not import {photo.name} to analyse it: {result}")
+        try:
+            run(library, [("library.selectAll", {}), ("mask.add", {"kind": "prompt", "text": text})])
+        except Failure as exc:
+            raise Failure(f"SAM 3 found nothing for {text!r} ({exc.message}); describe it in English, by what it looks like") from exc
+        settings = run(library, [("library.selectAll", {}), ("develop.get", {})])[-1]
+    comps = [c for m in settings.get("masks", []) for c in m.get("components", []) if c.get("shape", {}).get("kind") == "prompt"]
+    if not comps:
+        raise Failure("LightCraft made no prompt selection; its settings format may have changed")
+    shape = comps[-1]["shape"]
+    logits = np.full((height, width), -16.0, np.float32)
+    cell = float(max(width, height))
+    if shape.get("seg"):
+        cell = max(width, height) / int(shape["seg"]["side"])
+        grid, rect = _logits(shape["seg"])
+        logits, _ = _sample(grid, rect, width, height)
+    fine = None
+    for patch in shape.get("detail") or []:
+        grid, rect = _logits(patch)
+        value, inside = _sample(grid, rect, width, height)
+        value = np.where(inside, value, -np.inf)
+        fine = value if fine is None else np.maximum(fine, value)
+    if fine is not None:
+        logits = np.where(np.isfinite(fine), fine, logits)
+    return np.round(255 / (1 + np.exp(-logits))).astype(np.uint8), cell

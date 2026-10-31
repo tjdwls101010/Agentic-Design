@@ -34,6 +34,7 @@ UNITS = {
     "fonts": "feature",
     "version": "feature",
     "proof": "feature",
+    "cutout": "feature",
 }
 
 # Imports run one way: features → systems and stores → helpers.

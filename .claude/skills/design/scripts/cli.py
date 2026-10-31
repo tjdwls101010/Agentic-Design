@@ -18,7 +18,7 @@ import json
 import re
 import sys
 
-from design import fonts, generate, ledger, paths, platforms, proof, sheet
+from design import cutout, fonts, generate, ledger, paths, platforms, proof, sheet
 from design import version as versions
 from design import job as jobs
 from design.errors import Failure, Usage
@@ -37,6 +37,7 @@ COMMANDS = {
     "generate": "Generate recorded gpt-image versions through Codex image_gen",
     "version": "Snapshot the current document (or a photo's develop settings) with its render as the next version",
     "restore": "Make an earlier version the current document again, keeping unversioned edits first",
+    "cutout": "Cut a person or object out of a photo (Vision, or SAM 3 by description) as a matte, onto its layer's mask",
     "proof": "Check sheets: feed-size views, platform zones, 100% crops, fonts and glyphs, strings, strays",
     "export": "Deliver a version at the platform's size and check it against the platform",
     "record": "Write 성진's notes, Claude's critique, the chosen attempt and the finals",
@@ -218,6 +219,23 @@ The restored state becomes a new version (restored_from N, parent N); nothing is
     p.add_argument("job", type=job_type, help="short name under data/ or a path")
     p.add_argument("--version", type=int, required=True, metavar="N", help="the version to make current")
 
+    p = command("cutout", """\
+output: {"summary", "matte": <assets/<stem>_matte[-N].png>, "size": [w, h] of the upright photo, "coverage": share kept (alpha 128+), "edge_share": soft edge pixels per kept pixel, "box": [x, y, w, h] of what is kept, "people"?: how many Vision found, "selected_by", "attached"?: {"doc", "layer", "placed_at"}, "next"}
+The matte is 8-bit greyscale at the photo's full size (EXIF orientation applied), white kept. With --doc and --layer it becomes that layer's mask (replacing one already there), so 성진 can paint it further in PhotoCraft.
+
+failures: exit 1 if Vision finds no person (kind person, no --select), --instance names no one, SAM 3 finds nothing for --select, the matte keeps nothing, or the layer is missing, ambiguous or links another photo; exit 2 if --matte differs in size from the photo, --instance is given for a subject, or --doc comes without --layer; exit 3 if macOS Vision, LightCraft (for --select) or PhotoCraft cannot run; exit 4 if the photo cannot be read; exit 5 if PhotoCraft has the document open or is running without a control port.""", details="""\
+Who is kept: every person (default), Vision's person --instance N (numbered left to right; Vision separates at most 4 and can give a back row one number), or a --select description run through SAM 3 in LightCraft (English only: "man in a navy suit", "the woman on the left", "microphone"; the first analysis of a photo takes tens of seconds). With --kind person the edge always comes from Vision's full-resolution person matte inside that choice, so hair stays fine; an object SAM includes but Vision does not count as person (a held microphone, a sign) is dropped — use --kind subject to keep SAM's own matte, whose edge is coarse (its grid is a few hundred cells a side). --matte takes a matte drawn or fixed by hand, or one from elsewhere, as it is.
+What a matte commonly misses is where to look: hair against a bright ground, glasses temples, hands holding things, microphones, overlapping people.""")
+    p.add_argument("job", type=job_type, help="short name under data/ or a path")
+    p.add_argument("photo", type=existing_file, help="the photo to cut from (in sources/ or assets/)")
+    p.add_argument("--kind", choices=["person", "subject"], default="person", help="person (default): people, edge from Vision's person matte; subject: foreground objects, or SAM's own matte with --select")
+    p.add_argument("--instance", type=int, metavar="N", help="keep only Vision's person N (1 = leftmost)")
+    p.add_argument("--select", metavar="TEXT", help="keep what this English description names (SAM 3 through LightCraft)")
+    p.add_argument("--matte", type=existing_file, metavar="PNG", help="use this matte instead of making one (white kept, the photo's size)")
+    p.add_argument("--doc", metavar="PATH", help="a PhotoCraft document whose photo layer gets the matte as its mask")
+    p.add_argument("--layer", metavar="NAME", help="with --doc: the name of the layer showing this photo")
+    p.add_argument("--choke", type=int, default=0, choices=range(0, 9), metavar="PX", help="pull the matte's edge in by this many photo pixels, 0-8 (default 0): removes a light rim a bright background leaves around dark hair")
+
     p = command("proof", f"""\
 output: {{"summary": problems first (font fallback, glyph gaps, brief strings missing, layers outside the canvas, missing links, wrong aspect) then how many sheets to read, "dir": <proof/N/>, "read": [sheets, views first], "render_size", "size"?, "fonts": [{{"layer"?, "requested", "actual", "fallback", "why"?, "missing_glyphs"?}}], "glyph_gaps": [{{"layer", "postscript", "missing": [chars], "blank": [chars]}}], "strings": [{{"layer", "text"}}], "brief_text_missing"?: [...], "outside": [{{"layer", "kind", "where"}}], "missing_links": [...], "platform_notes"?, "export_warnings"?}}
 Sheets: views.png (the render at the widths the platform is commonly seen at, real pixel size), zones.png (what the platform covers or crops, unofficial ones marked), full.png (the render), crop-K.png (each --crop at 100%).
@@ -333,6 +351,12 @@ def run(args: argparse.Namespace, ap: Parser) -> tuple[dict, int]:
         return versions.snapshot(args.job, kind=args.kind, direction=args.direction, change=args.change, parent=args.parent, doc=paths.resolve_input(args.doc) if args.doc else None, photo=args.photo_id, photo_file=paths.resolve_input(args.photo) if args.photo else None), 0
     if cmd == "restore":
         return versions.restore(args.job, v=args.version), 0
+    if cmd == "cutout":
+        if sum(x is not None for x in (args.instance, args.select, args.matte)) > 1:
+            ap.error("cutout: give one of --instance, --select and --matte")
+        if (args.doc is None) != (args.layer is None):
+            ap.error("cutout: --doc and --layer go together")
+        return cutout.cutout(args.job, args.photo, kind=args.kind, instance=args.instance, select=args.select, matte_file=args.matte, doc=paths.resolve_input(args.doc) if args.doc else None, layer=args.layer, choke=args.choke), 0
     if cmd == "proof":
         doc = paths.resolve_input(args.doc) if args.doc else versions.pick_doc(args.job)
         return proof.proof(args.job, ledger.read(args.job)["brief"], doc=doc, target=args.target, crops=args.crop), 0
