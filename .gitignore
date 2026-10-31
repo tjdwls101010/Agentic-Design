@@ -1,0 +1,8 @@
+.DS_Store
+.tmp/
+__pycache__/
+.pytest_cache/
+.codex-runs/
+.claude/skills/design/data
+.claude/histories
+.claude/plans/
