@@ -6,3 +6,4 @@ __pycache__/
 .claude/skills/design/data
 .claude/histories
 .claude/plans/
+.claude-runs/
